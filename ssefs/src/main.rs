@@ -16,7 +16,6 @@ use std::collections::HashMap;
 const TTL: Duration = Duration::from_secs(1);
 
 const ROOT_INO: u64 = 1;
-const FRUIT_INO: u64 = 2;
 
 #[derive(Deserialize)]
 struct SearchResult {
@@ -24,7 +23,25 @@ struct SearchResult {
 }
 
 struct MyFS {
-    dirs: HashMap<u64, String>,
+    next_inode: u64,
+    inode_to_query: HashMap<u64, String>,
+    query_to_inode: HashMap<String, u64>,
+}
+
+impl MyFS {
+    fn get_inode(&mut self, query: &str) -> u64 {
+        if let Some(&ino) = self.query_to_inode.get(query) {
+            return ino;
+        }
+
+        let ino = self.next_inode;
+        self.next_inode += 1;
+
+        self.query_to_inode.insert(query.to_string(), ino);
+        self.inode_to_query.insert(ino, query.to_string());
+
+        return ino;
+    }
 }
 
 impl Filesystem for MyFS {
@@ -42,57 +59,52 @@ impl Filesystem for MyFS {
             name
         );
 
-        if parent == ROOT_INO
-            && name.to_str() == Some("fruit")
-        {
-            let attr = FileAttr {
-                ino: FRUIT_INO,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: 1000,
-                gid: 1000,
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
+        let parent_query = match self.inode_to_query.get(&parent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let query =
+            if parent_query.is_empty() {
+                name.to_string_lossy().to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_query,
+                    name.to_string_lossy()
+                )
             };
 
-            reply.entry(&TTL, &attr, 0);
-            return;
-        }
-
-        if parent == FRUIT_INO
-            && name.to_str() == Some("fruit")
-        {
-            let attr = FileAttr {
-                ino: 3,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: 1000,
-                gid: 1000,
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
+        let ino = self.get_inode(&query);
+        let kind = if query.ends_with(".txt") {
+                FileType::RegularFile
+            } else {
+                FileType::Directory
             };
 
-            reply.entry(&TTL, &attr, 0);
-            return;
-        }
+        let attr = FileAttr {
+            ino: ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: kind,
+            perm: 0o644,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
 
-        reply.error(libc::ENOENT);
+        reply.entry(&TTL, &attr, 0);
+        return;
     }
 
     fn getattr(
@@ -102,69 +114,46 @@ impl Filesystem for MyFS {
         reply: ReplyAttr,
     ) {
         println!("getattr({})", ino);
-        let attr = match ino {
 
-            ROOT_INO => FileAttr {
-                ino: ROOT_INO,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: 1000,
-                gid: 1000,
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
-            },
-
-            FRUIT_INO => FileAttr {
-                ino: FRUIT_INO,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: 1000,
-                gid: 1000,
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
-            },
-
-            3 => FileAttr {
-                ino: 3,
-                size: 0,
-                blocks: 0,
-                atime: SystemTime::now(),
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
-                crtime: SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: 1000,
-                gid: 1000,
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
-            },
-
-            _ => {
+        let query = match self.inode_to_query.get(&ino) {
+            Some(q) => q.clone(),
+            None => {
                 reply.error(libc::ENOENT);
                 return;
             }
         };
 
+        let kind = if query.is_empty() {
+            FileType::Directory
+        } else {
+            let kind2 = if query.ends_with(".txt") {
+                FileType::RegularFile
+            } else {
+                FileType::Directory
+            };
+            kind2
+        };
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind,
+            perm: 0o755,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
         reply.attr(&TTL, &attr);
+        return;
     }
 
     fn readdir(
@@ -175,7 +164,6 @@ impl Filesystem for MyFS {
         _offset: i64,
         mut reply: ReplyDirectory,
     ) {
-
         println!("readdir({}, {})", ino, _offset);
 
         if _offset != 0 {
@@ -183,60 +171,57 @@ impl Filesystem for MyFS {
             return;
         }
 
-        if ino == ROOT_INO {
-
-            let _ = reply.add(ROOT_INO, 1, FileType::Directory, ".");
-            let _ = reply.add(ROOT_INO, 2, FileType::Directory, "..");
-            let _ = reply.add(FRUIT_INO, 3, FileType::Directory, "fruit");
-
-            reply.ok();
-            return;
-        }
-
-        if ino == FRUIT_INO {
-
-            let _ = reply.add(FRUIT_INO, 1, FileType::Directory, ".");
-            let _ = reply.add(ROOT_INO, 2, FileType::Directory, "..");
-
-            // さらに fruit を生やす
-            let _ = reply.add(3, 3, FileType::Directory, "fruit");
-
-            reply.ok();
-            return;
-        }
-
-        if ino == 3 {
-
-            let result: SearchResult =
-                reqwest::blocking::get(
-                    "http://192.168.11.8:2226/search?token=fruit/fruit"
-                )
-                .unwrap()
-                .json()
-                .unwrap();
-
-            let _ = reply.add(FRUIT_INO, 1, FileType::Directory, ".");
-            let _ = reply.add(ROOT_INO, 2, FileType::Directory, "..");
-
-            let mut ino_num = 100;
-
-            for file in result.files {
-
-                let _ = reply.add(
-                    ino_num,
-                    ino_num as i64,
-                    FileType::RegularFile,
-                    file,
-                );
-
-                ino_num += 1;
+        // inode → query
+        let mut query = match self.inode_to_query.get(&ino) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
             }
+        };
 
-            reply.ok();
-            return;
+        // ルートは子ディレクトリを出す
+        if query.is_empty() {
+            query = ".".to_string();
         }
 
-        reply.error(libc::ENOENT);
+        println!("query = {}", query);
+
+        // どのinodeでも同じ処理
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            query
+        );
+
+        let result: SearchResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        for file in result.files {
+            let child_query = format!("{}/{}", query, file);
+            let child_ino = self.get_inode(&child_query);
+
+            let _ = reply.add(
+                child_ino,
+                1,
+                FileType::RegularFile,
+                file,
+            );
+        }
+
+        println!("child_query = {}", ino);
+        reply.ok();
+        return;
     }
 }
 
@@ -248,7 +233,13 @@ fn main() {
 
     fuser::mount2(
         MyFS {
-            dirs: HashMap::new(),
+            inode_to_query: HashMap::from([
+                (ROOT_INO, "".to_string()),
+            ]),
+            query_to_inode: HashMap::from([
+                ("".to_string(), ROOT_INO),
+            ]),
+            next_inode: 2,
         },
         mountpoint,
         &[MountOption::FSName("ssefs".into())],
