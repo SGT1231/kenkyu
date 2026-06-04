@@ -4,7 +4,7 @@
 git add -A
 
 # 変更がないなら終了
-if [ -z "$(git diff --cached --name-only)" ]; then
+if [ -z "$(git diff --name-only)" ]; then
   echo "No changes to commit."
   exit 0
 fi
@@ -44,7 +44,7 @@ RESP=$(jq -n \
   '{
     prompt: $prompt,
     n_predict: 100,
-    temperature: 0.3
+    temperature: 0.7
   }' | curl -s http://localhost:8080/completion \
   -H "Content-Type: application/json" \
   -d @-)
