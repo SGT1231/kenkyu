@@ -13,9 +13,29 @@ use std::ffi::OsStr;
 
 use std::collections::HashMap;
 
+use sha2::{
+    Digest,
+    Sha256,
+};
+
+use aes_gcm::{
+    Aes256Gcm,
+    KeyInit,
+    Nonce,
+    aead::Aead,
+};
+
+use rand::RngCore;
+use base64::{
+    engine::general_purpose::STANDARD,
+    Engine,
+};
+
 const TTL: Duration = Duration::from_secs(1);
 
 const ROOT_INO: u64 = 1;
+
+const KEY: [u8; 32] = *b"01234567890123456789012345678901";
 
 #[derive(Deserialize)]
 struct SearchResult {
@@ -42,6 +62,84 @@ impl MyFS {
 
         return ino;
     }
+
+    fn make_token(
+        secret: &str,
+        query: &str,
+    ) -> String {
+
+        let mut hasher =
+            Sha256::new();
+
+        hasher.update(secret);
+        hasher.update(query);
+
+        hex::encode(
+            hasher.finalize()
+        )
+    }
+
+
+    fn encrypt_filename(
+        key: &[u8; 32],
+        filename: &str,
+    ) -> String {
+
+        let cipher =
+            Aes256Gcm::new_from_slice(key)
+                .unwrap();
+
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng()
+            .fill_bytes(&mut nonce_bytes);
+
+        let nonce =
+            Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext =
+            cipher.encrypt(
+                nonce,
+                filename.as_bytes(),
+            )
+            .unwrap();
+
+        let mut result =
+            nonce_bytes.to_vec();
+
+        result.extend(ciphertext);
+
+        STANDARD.encode(result)
+    }
+
+    fn decrypt_filename(
+        key: &[u8; 32],
+        encoded: &str,
+    ) -> String {
+
+        let data =
+            STANDARD.decode(encoded)
+                .unwrap();
+
+        let (nonce_bytes, ciphertext) =
+            data.split_at(12);
+
+        let cipher =
+            Aes256Gcm::new_from_slice(key)
+                .unwrap();
+
+        let nonce =
+            Nonce::from_slice(nonce_bytes);
+
+        let plaintext =
+            cipher.decrypt(
+                nonce,
+                ciphertext,
+            )
+            .unwrap();
+
+        String::from_utf8(plaintext)
+            .unwrap()
+    }
 }
 
 impl Filesystem for MyFS {
@@ -66,6 +164,64 @@ impl Filesystem for MyFS {
                 return;
             }
         };
+
+        //
+        // 親ディレクトリを検索
+        //
+        let token =
+            if parent_query.is_empty() {
+                ".".to_string()
+            } else {
+                parent_query.clone()
+            };
+
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            MyFS::make_token("oreore-key", &token,),
+        );
+
+        let result: SearchResult =
+            match reqwest::blocking::get(&url) {
+                Ok(res) => match res.json() {
+                    Ok(json) => json,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        //
+        // lookup対象名
+        //
+        let target_name =
+            name.to_string_lossy().to_string();
+
+        //
+        // 復号して存在確認
+        //
+        let mut found = false;
+
+        for encrypted_name in &result.files {
+
+            let plain_name =
+                MyFS::decrypt_filename(&KEY ,encrypted_name);
+
+            if plain_name == target_name {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            println!("not found");
+            reply.error(libc::ENOENT);
+            return;
+        }
 
         let query =
             if parent_query.is_empty() {
@@ -126,7 +282,7 @@ impl Filesystem for MyFS {
         let kind = if query.is_empty() {
             FileType::Directory
         } else {
-            let kind2 = if query.ends_with(".txt") {
+            let kind2 = if query.contains(".") {
                 FileType::RegularFile
             } else {
                 FileType::Directory
@@ -143,7 +299,7 @@ impl Filesystem for MyFS {
             ctime: SystemTime::now(),
             crtime: SystemTime::now(),
             kind,
-            perm: 0o755,
+            perm: 0o644,
             nlink: 2,
             uid: 1000,
             gid: 1000,
@@ -188,9 +344,11 @@ impl Filesystem for MyFS {
         println!("query = {}", query);
 
         // どのinodeでも同じ処理
+        let token = MyFS::make_token("oreore-key", &query);
+
         let url = format!(
             "http://192.168.11.8:2226/search?token={}",
-            query
+            token
         );
 
         let result: SearchResult = match reqwest::blocking::get(&url) {
@@ -207,7 +365,13 @@ impl Filesystem for MyFS {
             }
         };
 
-        for file in result.files {
+        for enc_name in result.files {
+            let file =
+                MyFS::decrypt_filename(
+                    &KEY,
+                    &enc_name,
+                );
+
             let child_query = format!("{}/{}", query, file);
             let child_ino = self.get_inode(&child_query);
 
@@ -224,6 +388,34 @@ impl Filesystem for MyFS {
         return;
     }
 }
+/*
+fn main() {
+
+    let key =
+        *b"01234567890123456789012345678901";
+
+    let encrypted =
+        MyFS::encrypt_filename(
+            &key,
+            "art",
+        );
+
+    println!(
+        "encrypted = {}",
+        encrypted
+    );
+
+    let decrypted =
+        MyFS::decrypt_filename(
+            &key,
+            &encrypted,
+        );
+
+    println!(
+        "decrypted = {}",
+        decrypted
+    );
+}*/
 
 fn main() {
 
