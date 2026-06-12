@@ -3,12 +3,12 @@ use std::time::{Duration, SystemTime};
 use fuser::{
     FileAttr, FileType, Filesystem,
     MountOption, ReplyAttr, ReplyDirectory,
-    Request,
+    Request, ReplyEntry, ReplyCreate
 };
 
+use serde::Serialize;
 use serde::Deserialize;
 
-use fuser::ReplyEntry;
 use std::ffi::OsStr;
 
 use std::collections::HashMap;
@@ -36,6 +36,12 @@ const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 
 const KEY: [u8; 32] = *b"01234567890123456789012345678901";
+
+#[derive(Serialize)]
+struct AddRequest {
+    token: String,
+    ciphertext: String,
+}
 
 #[derive(Deserialize)]
 struct SearchResult {
@@ -140,6 +146,26 @@ impl MyFS {
         String::from_utf8(plaintext)
             .unwrap()
     }
+
+    fn add_index(
+        token: &str,
+        ciphertext: &str,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    {
+        let req = AddRequest {
+            token: token.to_string(),
+            ciphertext: ciphertext.to_string(),
+        };
+
+        let client = reqwest::blocking::Client::new();
+
+        client
+            .post("http://192.168.11.8:2226/add")
+            .json(&req)
+            .send()?;
+
+        Ok(())
+    }
 }
 
 impl Filesystem for MyFS {
@@ -177,7 +203,7 @@ impl Filesystem for MyFS {
 
         let url = format!(
             "http://192.168.11.8:2226/search?token={}",
-            MyFS::make_token("oreore-key", &token,),
+            MyFS::make_token("oreore-key", &token),
         );
 
         let result: SearchResult =
@@ -383,9 +409,139 @@ impl Filesystem for MyFS {
             );
         }
 
-        println!("child_query = {}", ino);
         reply.ok();
         return;
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        println!(
+            "create(parent={}, name={:?}, mode={}, flags={})",
+            parent,
+            name,
+            mode,
+            flags,
+        );
+
+        let parent_query =
+            match self.inode_to_query.get(&parent) {
+                Some(q) => q.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+        let query =
+            if parent_query.is_empty() {
+                name.to_string_lossy().to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_query,
+                    name.to_string_lossy()
+                )
+            };
+
+        println!("parent={}, query={}", parent_query, query);
+
+        let ino = self.get_inode(&query);
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
+        let mut token =
+            if parent_query.is_empty() {
+                ".".to_string()
+            } else {
+                parent_query.clone()
+            };
+
+        token = MyFS::make_token("oreore-key", &token);
+        let ciphertext = MyFS::encrypt_filename(&KEY, &query);
+
+        match MyFS::add_index(
+            &token,
+            &ciphertext,
+        ) {
+            Ok(_) => {
+                println!("index updated");
+            }
+            Err(e) => {
+                println!("index update failed: {}", e);
+            }
+        }
+
+        reply.created(
+            &TTL,
+            &attr,
+            0,
+            0,
+            flags as u32,
+        );
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        println!("setattr({})", ino);
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+        reply.attr(&TTL, &attr);
     }
 }
 /*
