@@ -13,6 +13,12 @@ pub struct SearchResult {
     pub files: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct StatResult {
+    pub size: u64,
+    pub is_dir: bool,
+}
+
 pub fn add_index(
     token: &str,
     ciphertext: &str,

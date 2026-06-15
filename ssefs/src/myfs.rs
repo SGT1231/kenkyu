@@ -131,23 +131,51 @@ impl Filesystem for MyFS {
             };
 
         let ino = self.get_inode(&query);
-        let kind = if query.ends_with(".txt") {
-                FileType::RegularFile
+        let token =
+            if query.is_empty() {
+                crypto::make_token("oreore-key", ".")
             } else {
+                crypto::make_token("oreore-key", &query)
+            };
+
+        let url = format!(
+            "http://192.168.11.8:2226/stat?token={}",
+            token,
+        );
+
+        let result: server_api::StatResult =
+            match reqwest::blocking::get(&url) {
+                Ok(res) => match res.json() {
+                    Ok(json) => json,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        let kind =
+            if result.is_dir {
                 FileType::Directory
+            } else {
+                FileType::RegularFile
             };
 
         let attr = FileAttr {
-            ino: ino,
-            size: 0,
-            blocks: 0,
+            ino,
+            size: result.size,
+            blocks: (result.size + 511) / 512,
             atime: SystemTime::now(),
             mtime: SystemTime::now(),
             ctime: SystemTime::now(),
             crtime: SystemTime::now(),
-            kind: kind,
+            kind,
             perm: 0o644,
-            nlink: 2,
+            nlink: 1,
             uid: 1000,
             gid: 1000,
             rdev: 0,
@@ -159,54 +187,77 @@ impl Filesystem for MyFS {
         return;
     }
 
-    fn getattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        reply: ReplyAttr,
-    ) {
-        println!("getattr({})", ino);
+fn getattr(
+    &mut self,
+    _req: &Request<'_>,
+    ino: u64,
+    reply: ReplyAttr,
+) {
+    println!("getattr({})", ino);
 
-        let query = match self.inode_to_query.get(&ino) {
-            Some(q) => q.clone(),
-            None => {
-                reply.error(libc::ENOENT);
+    let query = match self.inode_to_query.get(&ino) {
+        Some(q) => q.clone(),
+        None => {
+            reply.error(libc::ENOENT);
+            return;
+        }
+    };
+
+    let token =
+        if query.is_empty() {
+            crypto::make_token("oreore-key", ".")
+        } else {
+            crypto::make_token("oreore-key", &query)
+        };
+
+    let url = format!(
+        "http://192.168.11.8:2226/stat?token={}",
+        token,
+    );
+
+    let result: server_api::StatResult =
+        match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
                 return;
             }
         };
 
-        let kind = if query.is_empty() {
+    let kind =
+        if result.is_dir {
             FileType::Directory
         } else {
-            let kind2 = if query.contains(".") {
-                FileType::RegularFile
-            } else {
-                FileType::Directory
-            };
-            kind2
+            FileType::RegularFile
         };
 
-        let attr = FileAttr {
-            ino,
-            size: 0,
-            blocks: 0,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
-            kind,
-            perm: 0o644,
-            nlink: 2,
-            uid: 1000,
-            gid: 1000,
-            rdev: 0,
-            blksize: 512,
-            flags: 0,
-        };
+    println!("size={}", result.size);
+    let attr = FileAttr {
+        ino,
+        size: result.size,
+        blocks: (result.size + 511) / 512,
+        atime: SystemTime::now(),
+        mtime: SystemTime::now(),
+        ctime: SystemTime::now(),
+        crtime: SystemTime::now(),
+        kind,
+        perm: 0o644,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        rdev: 0,
+        blksize: 512,
+        flags: 0,
+    };
 
-        reply.attr(&TTL, &attr);
-        return;
-    }
+    reply.attr(&TTL, &attr);
+}
 
     fn readdir(
         &mut self,
@@ -216,12 +267,12 @@ impl Filesystem for MyFS {
         _offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        println!("readdir({}, {})", ino, _offset);
-
         if _offset != 0 {
             reply.ok();
             return;
         }
+        
+        println!("readdir({}, {})", ino, _offset);
 
         // inode → query
         let mut query = match self.inode_to_query.get(&ino) {
@@ -274,7 +325,7 @@ impl Filesystem for MyFS {
             let _ = reply.add(
                 child_ino,
                 1,
-                FileType::RegularFile,
+                FileType::Directory,
                 file,
             );
         }
