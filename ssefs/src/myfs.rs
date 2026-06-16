@@ -416,6 +416,21 @@ fn getattr(
             }
         }
 
+        let upload_file_token = crypto::make_token("oreore-key", &query);
+        match server_api::upload(
+            &upload_file_token,
+            "",
+        ) {
+            Ok(_) => {
+                println!("upload ok");
+            }
+            Err(e) => {
+                println!("upload failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
         reply.created(
             &TTL,
             &attr,

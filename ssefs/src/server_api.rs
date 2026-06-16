@@ -8,6 +8,12 @@ struct AddRequest {
     ciphertext: String,
 }
 
+#[derive(Serialize)]
+struct UploadRequest {
+    filename: String,
+    content: String,
+}
+
 #[derive(Deserialize)]
 pub struct SearchResult {
     pub files: Vec<String>,
@@ -35,6 +41,42 @@ pub fn add_index(
         .post("http://192.168.11.8:2226/add")
         .json(&req)
         .send()?;
+
+    Ok(())
+}
+
+pub fn upload(
+    filename: &str,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    let req = UploadRequest {
+        filename: filename.to_string(),
+        content: content.to_string(),
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    println!(
+        "upload filename={} content={:?}",
+        filename,
+        content,
+    );
+
+    let response = client
+        .post("http://192.168.11.8:2226/upload")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "upload failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
 
     Ok(())
 }
