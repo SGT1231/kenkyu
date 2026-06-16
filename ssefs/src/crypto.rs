@@ -17,6 +17,8 @@ use base64::{
 
 use rand::RngCore;
 
+const KEY: [u8; 32] = *b"01234567890123456789012345678901";
+
 pub fn make_token(
     secret: &str,
     query: &str,
@@ -33,13 +35,12 @@ pub fn make_token(
     )
 }
 
-pub fn encrypt_filename(
-    key: &[u8; 32],
-    filename: &str,
+pub fn encrypt(
+    file: &str,
 ) -> String {
 
     let cipher =
-        Aes256Gcm::new_from_slice(key)
+        Aes256Gcm::new_from_slice(&KEY)
             .unwrap();
 
     let mut nonce_bytes = [0u8; 12];
@@ -52,7 +53,7 @@ pub fn encrypt_filename(
     let ciphertext =
         cipher.encrypt(
             nonce,
-            filename.as_bytes(),
+            file.as_bytes(),
         )
         .unwrap();
 
@@ -64,20 +65,18 @@ pub fn encrypt_filename(
     STANDARD.encode(result)
 }
 
-pub fn decrypt_filename(
-    key: &[u8; 32],
-    encoded: &str,
+pub fn decrypt(
+    file: &str,
 ) -> String {
-
     let data =
-        STANDARD.decode(encoded)
+        STANDARD.decode(file.trim())
             .unwrap();
 
     let (nonce_bytes, ciphertext) =
         data.split_at(12);
 
     let cipher =
-        Aes256Gcm::new_from_slice(key)
+        Aes256Gcm::new_from_slice(&KEY)
             .unwrap();
 
     let nonce =

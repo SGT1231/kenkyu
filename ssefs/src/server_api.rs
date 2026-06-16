@@ -25,6 +25,8 @@ pub struct StatResult {
     pub is_dir: bool,
 }
 
+use crate::crypto;
+
 pub fn add_index(
     token: &str,
     ciphertext: &str,
@@ -79,4 +81,35 @@ pub fn upload(
     }
 
     Ok(())
+}
+
+pub fn download(
+    token: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>>
+{
+    let url =
+        format!(
+            "http://192.168.11.8:2226/download?token={}",
+            token
+        );
+
+    let response =
+        reqwest::blocking::get(url)?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "download failed: {}",
+                response.status()
+            )
+            .into()
+        );
+    }
+
+    let encoded = response.text()?;
+    let plaintext = crypto::decrypt(&encoded);
+
+    Ok(
+        plaintext.into_bytes()
+    )
 }

@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use fuser::{
     FileAttr, FileType, Filesystem,
-    ReplyAttr, ReplyDirectory,
+    ReplyAttr, ReplyDirectory, ReplyData,
     Request, ReplyEntry, ReplyCreate
 };
 
@@ -14,7 +14,6 @@ use crate::crypto;
 use crate::server_api;
 
 const TTL: Duration = Duration::from_secs(1);
-const KEY: [u8; 32] = *b"01234567890123456789012345678901";
 
 pub struct MyFS {
     pub next_inode: u64,
@@ -105,7 +104,7 @@ impl Filesystem for MyFS {
         for encrypted_name in &result.files {
 
             let plain_name =
-                crypto::decrypt_filename(&KEY ,encrypted_name);
+                crypto::decrypt(encrypted_name);
 
             if plain_name == target_name {
                 found = true;
@@ -313,11 +312,7 @@ fn getattr(
         };
 
         for enc_name in result.files {
-            let file =
-                crypto::decrypt_filename(
-                    &KEY,
-                    &enc_name,
-                );
+            let file = crypto::decrypt(&enc_name);
 
             let child_query = format!("{}/{}", query, file);
             let child_ino = self.get_inode(&child_query);
@@ -402,7 +397,7 @@ fn getattr(
             };
 
         token = crypto::make_token("oreore-key", &token);
-        let ciphertext = crypto::encrypt_filename(&KEY, &query);
+        let ciphertext = crypto::encrypt(&query);
 
         match server_api::add_index(
             &token,
@@ -437,6 +432,61 @@ fn getattr(
             0,
             0,
             flags as u32,
+        );
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+
+        println!("read({})", ino);
+
+        let query =
+            match self.inode_to_query.get(&ino) {
+                Some(q) => q.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+        let token = crypto::make_token("oreore-key", &query);
+
+        let data =
+            match server_api::download(
+                &token,
+            ) {
+                Ok(v) => v,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        let start =
+            offset as usize;
+
+        let end =
+            std::cmp::min(
+                start + size as usize,
+                data.len(),
+            );
+
+        if start >= data.len() {
+            reply.data(&[]);
+            return;
+        }
+
+        reply.data(
+            &data[start..end]
         );
     }
 
