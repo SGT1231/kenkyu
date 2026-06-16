@@ -52,7 +52,7 @@ impl Filesystem for MyFS {
             name
         );
 
-        let parent_query = match self.inode_to_query.get(&parent) {
+        let parent_path = match self.inode_to_query.get(&parent) {
             Some(q) => q.clone(),
             None => {
                 reply.error(libc::ENOENT);
@@ -63,16 +63,16 @@ impl Filesystem for MyFS {
         //
         // 親ディレクトリを検索
         //
-        let token =
-            if parent_query.is_empty() {
+        let parent_token =
+            if parent_path.is_empty() {
                 ".".to_string()
             } else {
-                parent_query.clone()
+                parent_path.clone()
             };
 
         let url = format!(
             "http://192.168.11.8:2226/search?token={}",
-            crypto::make_token("oreore-key", &token),
+            crypto::make_token("oreore-key", &parent_token),
         );
 
         let result: server_api::SearchResult =
@@ -93,8 +93,7 @@ impl Filesystem for MyFS {
         //
         // lookup対象名
         //
-        let target_name =
-            name.to_string_lossy().to_string();
+        let target_name = name.to_string_lossy().to_string();
 
         //
         // 復号して存在確認
@@ -103,8 +102,7 @@ impl Filesystem for MyFS {
 
         for encrypted_name in &result.files {
 
-            let plain_name =
-                crypto::decrypt(encrypted_name);
+            let plain_name = crypto::decrypt(encrypted_name);
 
             if plain_name == target_name {
                 found = true;
@@ -118,28 +116,28 @@ impl Filesystem for MyFS {
             return;
         }
 
-        let query =
-            if parent_query.is_empty() {
+        let path =
+            if parent_path.is_empty() {
                 name.to_string_lossy().to_string()
             } else {
                 format!(
                     "{}/{}",
-                    parent_query,
+                    parent_path,
                     name.to_string_lossy()
                 )
             };
 
-        let ino = self.get_inode(&query);
-        let token =
-            if query.is_empty() {
+        let ino = self.get_inode(&path);
+        let path_token =
+            if path.is_empty() {
                 crypto::make_token("oreore-key", ".")
             } else {
-                crypto::make_token("oreore-key", &query)
+                crypto::make_token("oreore-key", &path)
             };
 
         let url = format!(
             "http://192.168.11.8:2226/stat?token={}",
-            token,
+            path_token,
         );
 
         let result: server_api::StatResult =
@@ -186,77 +184,77 @@ impl Filesystem for MyFS {
         return;
     }
 
-fn getattr(
-    &mut self,
-    _req: &Request<'_>,
-    ino: u64,
-    reply: ReplyAttr,
-) {
-    println!("getattr({})", ino);
+    fn getattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        reply: ReplyAttr,
+    ) {
+        println!("getattr({})", ino);
 
-    let query = match self.inode_to_query.get(&ino) {
-        Some(q) => q.clone(),
-        None => {
-            reply.error(libc::ENOENT);
-            return;
-        }
-    };
-
-    let token =
-        if query.is_empty() {
-            crypto::make_token("oreore-key", ".")
-        } else {
-            crypto::make_token("oreore-key", &query)
-        };
-
-    let url = format!(
-        "http://192.168.11.8:2226/stat?token={}",
-        token,
-    );
-
-    let result: server_api::StatResult =
-        match reqwest::blocking::get(&url) {
-            Ok(res) => match res.json() {
-                Ok(json) => json,
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            },
-            Err(_) => {
-                reply.error(libc::EIO);
+        let path = match self.inode_to_query.get(&ino) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
                 return;
             }
         };
 
-    let kind =
-        if result.is_dir {
-            FileType::Directory
-        } else {
-            FileType::RegularFile
+        let path_token =
+            if path.is_empty() {
+                crypto::make_token("oreore-key", ".")
+            } else {
+                crypto::make_token("oreore-key", &path)
+            };
+
+        let url = format!(
+            "http://192.168.11.8:2226/stat?token={}",
+            path_token,
+        );
+
+        let result: server_api::StatResult =
+            match reqwest::blocking::get(&url) {
+                Ok(res) => match res.json() {
+                    Ok(json) => json,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        let kind =
+            if result.is_dir {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            };
+
+        println!("size={}", result.size);
+        let attr = FileAttr {
+            ino,
+            size: result.size,
+            blocks: (result.size + 511) / 512,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
         };
 
-    println!("size={}", result.size);
-    let attr = FileAttr {
-        ino,
-        size: result.size,
-        blocks: (result.size + 511) / 512,
-        atime: SystemTime::now(),
-        mtime: SystemTime::now(),
-        ctime: SystemTime::now(),
-        crtime: SystemTime::now(),
-        kind,
-        perm: 0o644,
-        nlink: 1,
-        uid: 1000,
-        gid: 1000,
-        rdev: 0,
-        blksize: 512,
-        flags: 0,
-    };
-
-    reply.attr(&TTL, &attr);
-}
+        reply.attr(&TTL, &attr);
+    }
 
     fn readdir(
         &mut self,
@@ -274,7 +272,7 @@ fn getattr(
         println!("readdir({}, {})", ino, _offset);
 
         // inode → query
-        let mut query = match self.inode_to_query.get(&ino) {
+        let mut path = match self.inode_to_query.get(&ino) {
             Some(q) => q.clone(),
             None => {
                 reply.error(libc::ENOENT);
@@ -283,14 +281,13 @@ fn getattr(
         };
 
         // ルートは子ディレクトリを出す
-        if query.is_empty() {
-            query = ".".to_string();
+        if path.is_empty() {
+            path = ".".to_string();
         }
 
-        println!("query = {}", query);
-
         // どのinodeでも同じ処理
-        let token = crypto::make_token("oreore-key", &query);
+        let token = crypto::make_token("oreore-key", &path);
+        println!("token = {}", token);
 
         let url = format!(
             "http://192.168.11.8:2226/search?token={}",
@@ -311,11 +308,11 @@ fn getattr(
             }
         };
 
-        for enc_name in result.files {
-            let file = crypto::decrypt(&enc_name);
+        for enc_path in result.files {
+            let filename = crypto::decrypt(&enc_path);
 
-            let child_query = format!("{}/{}", query, file);
-            let child_ino = self.get_inode(&child_query);
+            let child_path = format!("{}/{}", path, filename);
+            let child_ino = self.get_inode(&child_path);
 
             let _ = reply.add(
                 child_ino,
@@ -347,7 +344,7 @@ fn getattr(
             flags,
         );
 
-        let parent_query =
+        let parent_path =
             match self.inode_to_query.get(&parent) {
                 Some(q) => q.clone(),
                 None => {
@@ -356,20 +353,9 @@ fn getattr(
                 }
             };
 
-        let query =
-            if parent_query.is_empty() {
-                name.to_string_lossy().to_string()
-            } else {
-                format!(
-                    "{}/{}",
-                    parent_query,
-                    name.to_string_lossy()
-                )
-            };
+        let name = name.to_string_lossy().to_string();
 
-        println!("parent={}, query={}", parent_query, query);
-
-        let ino = self.get_inode(&query);
+        let ino = self.get_inode(&name);
 
         let attr = FileAttr {
             ino,
@@ -389,19 +375,19 @@ fn getattr(
             flags: 0,
         };
 
-        let mut token =
-            if parent_query.is_empty() {
+        let mut parent_token =
+            if parent_path.is_empty() {
                 ".".to_string()
             } else {
-                parent_query.clone()
+                parent_path.clone()
             };
 
-        token = crypto::make_token("oreore-key", &token);
-        let ciphertext = crypto::encrypt(&query);
+        parent_token = crypto::make_token("oreore-key", &parent_token);
+        let token = crypto::encrypt(&name);
 
         match server_api::add_index(
+            &parent_token,
             &token,
-            &ciphertext,
         ) {
             Ok(_) => {
                 println!("index updated");
@@ -411,9 +397,20 @@ fn getattr(
             }
         }
 
-        let upload_file_token = crypto::make_token("oreore-key", &query);
+        let path =
+            if parent_path.is_empty() {
+                name.to_string_lossy().to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_path,
+                    name.to_string_lossy()
+                )
+            };
+
+        let path_token = crypto::make_token("oreore-key", &path);
         match server_api::upload(
-            &upload_file_token,
+            &path_token,
             "",
         ) {
             Ok(_) => {
@@ -449,7 +446,7 @@ fn getattr(
 
         println!("read({})", ino);
 
-        let query =
+        let name =
             match self.inode_to_query.get(&ino) {
                 Some(q) => q.clone(),
                 None => {
@@ -458,7 +455,7 @@ fn getattr(
                 }
             };
 
-        let token = crypto::make_token("oreore-key", &query);
+        let token = crypto::make_token("oreore-key", &name);
 
         let data =
             match server_api::download(
