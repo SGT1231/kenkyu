@@ -25,6 +25,13 @@ pub struct StatResult {
     pub is_dir: bool,
 }
 
+#[derive(Serialize)]
+struct DeleteRequest {
+    parent_token: String,
+    ciphertext: String,
+    path_token: String,
+}
+
 use crate::crypto;
 
 pub fn add_index(
@@ -112,4 +119,36 @@ pub fn download(
     Ok(
         plaintext.into_bytes()
     )
+}
+
+pub fn delete(
+    parent_token: &str,
+    ciphertext: &str,
+    path_token: &str,
+) -> Result<(), Box<dyn std::error::Error>>
+{
+    let req = DeleteRequest {
+        parent_token: parent_token.to_string(),
+        ciphertext: ciphertext.to_string(),
+        path_token: path_token.to_string(),
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/delete")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "delete failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
+    Ok(())
 }

@@ -4,7 +4,8 @@ use std::time::{Duration, SystemTime};
 use fuser::{
     FileAttr, FileType, Filesystem,
     ReplyAttr, ReplyDirectory, ReplyData,
-    Request, ReplyEntry, ReplyCreate, ReplyWrite
+    Request, ReplyEntry, ReplyCreate, ReplyWrite,
+    ReplyEmpty
 };
 
 use std::ffi::OsStr;
@@ -308,6 +309,18 @@ impl Filesystem for MyFS {
             }
         };
 
+        let _ = reply.add(ino, 1, FileType::Directory, ".");
+        let parent_path =
+            match path.rfind('/') {
+                Some(pos) => &path[..pos],
+                None => "",
+            };
+
+        let parent_ino = self.get_inode(parent_path);
+        println!("parent_ino = {}", parent_ino);
+        let _ = reply.add(parent_ino, 2, FileType::Directory, "..");
+
+        let mut offset = 3;
         for enc_path in result.files {
             let filename = crypto::decrypt(&enc_path);
 
@@ -316,10 +329,11 @@ impl Filesystem for MyFS {
 
             let _ = reply.add(
                 child_ino,
-                1,
+                offset,
                 FileType::Directory,
                 filename,
             );
+            offset += 1;
         }
 
         reply.ok();
@@ -446,7 +460,7 @@ impl Filesystem for MyFS {
 
         println!("read({})", ino);
 
-        let name =
+        let path =
             match self.inode_to_query.get(&ino) {
                 Some(q) => q.clone(),
                 None => {
@@ -455,11 +469,11 @@ impl Filesystem for MyFS {
                 }
             };
 
-        let token = crypto::make_token("oreore-key", &name);
+        let path_token = crypto::make_token("oreore-key", &path);
 
         let data =
             match server_api::download(
-                &token,
+                &path_token,
             ) {
                 Ok(v) => v,
                 Err(_) => {
@@ -502,7 +516,7 @@ impl Filesystem for MyFS {
 
         println!("write({})", ino);
 
-        let name =
+        let path =
             match self.inode_to_query.get(&ino) {
                 Some(q) => q.clone(),
                 None => {
@@ -511,10 +525,10 @@ impl Filesystem for MyFS {
                 }
             };
 
-        let token = crypto::make_token("oreore-key", &name);
+        let path_token = crypto::make_token("oreore-key", &path);
 
         let mut content =
-            match server_api::download(&token) {
+            match server_api::download(&path_token) {
                 Ok(v) => v,
                 Err(_) => {
                     reply.error(libc::EIO);
@@ -539,7 +553,7 @@ impl Filesystem for MyFS {
         let encrypted = crypto::encrypt_bytes(&content);
 
         match server_api::upload(
-                &token,
+                &path_token,
                 &encrypted,
             ) {
                 Ok(_) => {}
@@ -550,6 +564,98 @@ impl Filesystem for MyFS {
             }
 
         reply.written(data.len() as u32);
+    }
+
+    fn unlink(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        println!(
+            "unlink(parent={}, name={:?})",
+            parent,
+            name,
+        );
+
+        let parent_path = match self.inode_to_query.get(&parent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let name = name.to_string_lossy().to_string();
+
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", parent_path, name)
+            };
+
+        let parent_token =
+            if parent_path.is_empty() {
+                crypto::make_token("oreore-key", ".")
+            } else {
+                crypto::make_token("oreore-key", &parent_path)
+            };
+
+        let path_token =
+            crypto::make_token(
+                "oreore-key",
+                &path,
+            );
+
+        
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            parent_token
+        );
+
+        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let mut enc_name = String::new();
+        for enc in result.files {
+            if crypto::decrypt(&enc) == name {
+                enc_name = enc;
+                break;
+            }
+        }
+        println!("enc_name = {}", enc_name);
+
+        match server_api::delete(
+            &parent_token,
+            &enc_name,
+            &path_token,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("delete failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        if let Some(ino) = self.query_to_inode.remove(&path) {
+            self.inode_to_query.remove(&ino);
+        }
+
+        reply.ok();
     }
 
     fn setattr(
