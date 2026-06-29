@@ -77,6 +77,10 @@ pub fn decrypt(
 
     let data = STANDARD.decode(file.trim()).unwrap();
 
+    if data.is_empty() {
+        return String::new();
+    }
+
     let (nonce_bytes, ciphertext) =
         data.split_at(12);
 
