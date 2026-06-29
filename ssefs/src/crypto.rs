@@ -38,6 +38,12 @@ pub fn make_token(
 pub fn encrypt(
     file: &str,
 ) -> String {
+    encrypt_bytes(file.as_bytes())
+}
+
+pub fn encrypt_bytes(
+    file: &[u8],
+) -> String {
 
     let cipher =
         Aes256Gcm::new_from_slice(&KEY)
@@ -53,7 +59,7 @@ pub fn encrypt(
     let ciphertext =
         cipher.encrypt(
             nonce,
-            file.as_bytes(),
+            file,
         )
         .unwrap();
 
@@ -68,9 +74,8 @@ pub fn encrypt(
 pub fn decrypt(
     file: &str,
 ) -> String {
-    let data =
-        STANDARD.decode(file.trim())
-            .unwrap();
+
+    let data = STANDARD.decode(file.trim()).unwrap();
 
     let (nonce_bytes, ciphertext) =
         data.split_at(12);

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use fuser::{
     FileAttr, FileType, Filesystem,
     ReplyAttr, ReplyDirectory, ReplyData,
-    Request, ReplyEntry, ReplyCreate
+    Request, ReplyEntry, ReplyCreate, ReplyWrite
 };
 
 use std::ffi::OsStr;
@@ -318,7 +318,7 @@ impl Filesystem for MyFS {
                 child_ino,
                 1,
                 FileType::Directory,
-                file,
+                filename,
             );
         }
 
@@ -399,12 +399,12 @@ impl Filesystem for MyFS {
 
         let path =
             if parent_path.is_empty() {
-                name.to_string_lossy().to_string()
+                name.to_string().to_string()
             } else {
                 format!(
                     "{}/{}",
                     parent_path,
-                    name.to_string_lossy()
+                    name.to_string()
                 )
             };
 
@@ -485,6 +485,71 @@ impl Filesystem for MyFS {
         reply.data(
             &data[start..end]
         );
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+
+        println!("write({})", ino);
+
+        let name =
+            match self.inode_to_query.get(&ino) {
+                Some(q) => q.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+        let token = crypto::make_token("oreore-key", &name);
+
+        let mut content =
+            match server_api::download(&token) {
+                Ok(v) => v,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        let start = offset as usize;
+
+        if content.len() < start {
+            content.resize(start, 0);
+        }
+
+        let end = start + data.len();
+
+        if content.len() < end {
+            content.resize(end, 0);
+        }
+
+        content[start..end].copy_from_slice(data);
+
+        let encrypted = crypto::encrypt_bytes(&content);
+
+        match server_api::upload(
+                &token,
+                &encrypted,
+            ) {
+                Ok(_) => {}
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            }
+
+        reply.written(data.len() as u32);
     }
 
     fn setattr(
