@@ -9,12 +9,12 @@
 - token：ファイル名をハッシュでトークン化したもの
 
 ## サーバ側のインデックス等の状態
-/
-|\_\_files/
-|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|\_\_（ファイル名（path）がハッシュ化，中身がAES）
-|
-|\_\_index/
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|\_\_（検索トークン（parent_pathまたはpath）がハッシュ化，中身のファイル名（name）がAES）
+/<br>
+|\_\_files/<br>
+|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|\_\_（ファイル名（path）がハッシュ化，中身がAES）<br>
+|<br>
+|\_\_index/<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|\_\_（検索トークン（parent_pathまたはpath）がハッシュ化，中身のファイル名（name）がAES）<br>
 
 
 ## ファイル内関数の流れ
@@ -22,64 +22,62 @@
 
 ### myfs.rs
 #### lookup()
-ファイルのinodeが存在するか確認
-① parent_pathを**ハッシュ化**
-② search APIを飛ばす
-<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font>
-④ 結果がAESで返ってくる
-⑤ 結果のファイルが**ファイルかディレクトリか**を判断するため，pathを**ハッシュ化**
-⑥ stat APIを飛ばす
-<font color=blue>⑦ サーバ側でfilesファイルを見る，pathに一致するファイルの属性を返す（rawデータ）
+ファイルのinodeが存在するか確認<br>
+① parent_pathを**ハッシュ化**<br>
+② search APIを飛ばす<br>
+<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font><br>
+④ 結果がAESで返ってくる<br>
+⑤ 結果のファイルが**ファイルかディレクトリか**を判断するため，pathを**ハッシュ化**<br>
+⑥ stat APIを飛ばす<br>
+<font color=blue>⑦ サーバ側でfilesファイルを見る，pathに一致するファイルの属性を返す（rawデータ）<br>
 
 #### getattr()
-ファイルの属性を取得
-① パスを**ハッシュ化**
-② stat APIを飛ばす
-<font color=blue>③ サーバ側でfilesファイルを見る，pathに一致するファイルの属性を返す（rawデータ）
+ファイルの属性を取得<br>
+① パスを**ハッシュ化**<br>
+② stat APIを飛ばす<br>
+<font color=blue>③ サーバ側でfilesファイルを見る，pathに一致するファイルの属性を返す（rawデータ）<br>
 
 #### readdir()
-ディレクトリ内を走査
-① パスを**ハッシュ化**
-② search APIを飛ばす
-<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font>
-④ 結果がAESで返ってくる
+ディレクトリ内を走査<br>
+① パスを**ハッシュ化**<br>
+② search APIを飛ばす<br>
+<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font><br>
+④ 結果がAESで返ってくる<br>
 
 #### create()
-ファイル作成（中身なし）
-① 親ディレクトリを取得，ファイル名も取得
-② parent_pathを**ハッシュ化**
-③ nameをAES
-<font color=blue>④ サーバ側でindexディレクトリにparent_tokenとenc_nameを登録</font>
-⑤ parent_path＋nameでpath生成
-⑥ pathを**ハッシュ化**して，upload APIを飛ばす
-<font color=blue>⑦ サーバ側でfilesディレクトリにファイルを置く</font>
+ファイル作成（中身なし）<br>
+① 親ディレクトリを取得，ファイル名も取得<br>
+② parent_pathを**ハッシュ化**<br>
+③ nameをAES<br>
+<font color=blue>④ サーバ側でindexディレクトリにparent_tokenとenc_nameを登録</font><br>
+⑤ parent_path＋nameでpath生成<br>
+⑥ pathを**ハッシュ化**して，upload APIを飛ばす<br>
+<font color=blue>⑦ サーバ側でfilesディレクトリにファイルを置く</font><br>
 
 #### read()
-ファイルの中身を読む
-① inodeからpathを取得，**トークン化**
-② download APIを飛ばす
-<font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font>
-④ AESを復号して表示
+ファイルの中身を読む<br>
+① inodeからpathを取得，**トークン化**<br>
+② download APIを飛ばす<br>
+<font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font><br>
+④ AESを復号して表示<br>
 
 #### write()
-ファイル書き込み
-① inodeからpathを取得，**トークン化**
-② download APIを飛ばす
-<font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font>
-④ AESを復号する．
-⑤ 追記するデータをAESで暗号化．ハッシュ化したpathとともにupload APIを飛ばす
-<font color=blue>⑦ サーバ側でfilesディレクトリにあるファイルに追記する</font>
+ファイル書き込み<br>
+① inodeからpathを取得，**トークン化**<br>
+② download APIを飛ばす<br>
+<font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font><br>
+④ AESを復号する．<br>
+⑤ 追記するデータをAESで暗号化．ハッシュ化したpathとともにupload APIを飛ばす<br>
+<font color=blue>⑦ サーバ側でfilesディレクトリにあるファイルに追記する</font><br>
 
 #### unlink()
-ファイルのinodeのリンク削除
-① parent_pathを**ハッシュ化**
-② search APIを飛ばす
-<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font>
-④ 結果がAESで返ってくる
-⑤ 復号してたらファイル名が出てくる．nameと比較して一致するものをenc_nameとする．
-⑥ parent_path，pathをそれぞれトークン化，とenc_nameを使って，delete APIを飛ばす
-<font color=blue>⑦ サーバ側でfilesディレクトリのpath_tokenに一致するものを削除，
-　 ＆indexディレクトリのparent_tokenに一致するファイル内の，enc_nameに一致するものを削除．
-⑧ inodeも削除
-
-echo "Hello World." > mnt/fruit/pineapple.ppa
+ファイルのinodeのリンク削除<br>
+① parent_pathを**ハッシュ化**<br>
+② search APIを飛ばす<br>
+<font color=blue>③ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font><br>
+④ 結果がAESで返ってくる<br>
+⑤ 復号してたらファイル名が出てくる．nameと比較して一致するものをenc_nameとする．<br>
+⑥ parent_path，pathをそれぞれトークン化，とenc_nameを使って，delete APIを飛ばす<br>
+<font color=blue>⑦ サーバ側でfilesディレクトリのpath_tokenに一致するものを削除，<br>
+　 ＆indexディレクトリのparent_tokenに一致するファイル内の，enc_nameに一致するものを削除．<br>
+⑧ inodeも削除<br>
