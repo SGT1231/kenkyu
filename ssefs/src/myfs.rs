@@ -678,6 +678,50 @@ impl Filesystem for MyFS {
     ) {
         println!("setattr({})", ino);
 
+        if let Some(new_size) = size {
+
+            println!("truncate -> {}", new_size);
+
+            let path =
+                match self.inode_to_query.get(&ino) {
+                    Some(q) => q.clone(),
+                    None => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                };
+
+            let path_token =
+                crypto::make_token(
+                    "oreore-key",
+                    &path,
+                );
+
+            let mut content =
+                match server_api::download(&path_token) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                };
+                
+            content.resize(new_size as usize, 0);
+
+            let encrypted = crypto::encrypt_bytes(&content);
+
+            match server_api::upload(
+                &path_token,
+                &encrypted,
+            ) {
+                Ok(_) => {}
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            }
+        }
+
         let attr = FileAttr {
             ino,
             size: 0,
