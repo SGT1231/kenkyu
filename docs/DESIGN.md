@@ -56,14 +56,14 @@
 
 #### read()
 ファイルの中身を読む<br>
-① inodeからpathを取得，**トークン化**<br>
+① inodeからpathを取得，**ハッシュ化**<br>
 ② download APIを飛ばす<br>
 <font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font><br>
 ④ AESを復号して表示<br>
 
 #### write()
 ファイル書き込み<br>
-① inodeからpathを取得，**トークン化**<br>
+① inodeからpathを取得，**ハッシュ化**<br>
 ② download APIを飛ばす<br>
 <font color=blue>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font><br>
 ④ AESを復号する．<br>
@@ -81,3 +81,12 @@
 <font color=blue>⑦ サーバ側でfilesディレクトリのpath_tokenに一致するものを削除，<br>
 　 ＆indexディレクトリのparent_tokenに一致するファイル内の，enc_nameに一致するものを削除．<br>
 ⑧ inodeも削除<br>
+
+#### setattr()
+ファイルの属性を(再)設定する<br>
+【ファイルサイズ変更】<br>
+Linuxでは後ろ部分のファイル削除は，ファイルサイズを変更することによって実現している．<br>
+① pathを取得，**ハッシュ化**<br>
+② download APIを飛ばす<br>
+③ 返ってきたファイルのサイズを変更<br>
+④ それをAESで暗号化し，path_tokenと共にupload APIを飛ばす<br>
