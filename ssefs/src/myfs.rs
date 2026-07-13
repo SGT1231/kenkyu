@@ -1,5 +1,5 @@
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr, FileType, Filesystem,
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::crypto;
 use crate::server_api;
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(60);
 
 pub struct MyFS {
     pub next_inode: u64,
@@ -166,18 +166,22 @@ impl Filesystem for MyFS {
         let attr = FileAttr {
             ino,
             size: result.size,
-            blocks: (result.size + 511) / 512,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
+            blocks: result.blocks,
+
+            atime: UNIX_EPOCH + Duration::from_secs(result.atime as u64),
+            mtime: UNIX_EPOCH + Duration::from_secs(result.mtime as u64),
+            ctime: UNIX_EPOCH + Duration::from_secs(result.ctime as u64),
+            crtime: UNIX_EPOCH + Duration::from_secs(result.ctime as u64),
+
             kind,
-            perm: 0o644,
-            nlink: 1,
-            uid: 1000,
-            gid: 1000,
-            rdev: 0,
-            blksize: 512,
+            perm: result.mode as u16,
+
+            nlink: result.nlink,
+            uid: result.uid,
+            gid: result.gid,
+
+            rdev: result.rdev,
+            blksize: result.blksize,
             flags: 0,
         };
 
@@ -240,15 +244,19 @@ impl Filesystem for MyFS {
             ino,
             size: result.size,
             blocks: (result.size + 511) / 512,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
+
+            atime: UNIX_EPOCH + Duration::from_secs(result.atime as u64),
+            mtime: UNIX_EPOCH + Duration::from_secs(result.mtime as u64),
+            ctime: UNIX_EPOCH + Duration::from_secs(result.ctime as u64),
+            crtime: UNIX_EPOCH + Duration::from_secs(result.ctime as u64),
+
             kind,
-            perm: 0o644,
-            nlink: 1,
-            uid: 1000,
-            gid: 1000,
+            perm: result.mode as u16,
+
+            nlink: result.nlink,
+            uid: result.uid,
+            gid: result.gid,
+            
             rdev: 0,
             blksize: 512,
             flags: 0,
@@ -346,7 +354,7 @@ impl Filesystem for MyFS {
         parent: u64,
         name: &OsStr,
         mode: u32,
-        umask: u32,
+        _umask: u32,
         flags: i32,
         reply: ReplyCreate,
     ) {
@@ -662,18 +670,18 @@ impl Filesystem for MyFS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
         size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
-        ctime: Option<SystemTime>,
-        fh: Option<u64>,
-        crtime: Option<SystemTime>,
-        chgtime: Option<SystemTime>,
-        bkuptime: Option<SystemTime>,
-        flags: Option<u32>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
         println!("setattr({})", ino);

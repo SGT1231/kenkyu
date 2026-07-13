@@ -23,6 +23,20 @@ pub struct SearchResult {
 pub struct StatResult {
     pub size: u64,
     pub is_dir: bool,
+
+    pub mode: u32,
+
+    pub atime: i64,
+    pub mtime: i64,
+    pub ctime: i64,
+
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    
+    pub blocks: u64,
+    pub blksize: u32,
+    pub rdev: u32,
 }
 
 #[derive(Serialize)]
