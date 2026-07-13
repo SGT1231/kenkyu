@@ -14,6 +14,11 @@ struct UploadRequest {
     content: String,
 }
 
+#[derive(Serialize)]
+struct MkdirRequest {
+    filename: String,
+}
+
 #[derive(Deserialize)]
 pub struct SearchResult {
     pub files: Vec<String>,
@@ -88,6 +93,39 @@ pub fn upload(
 
     let response = client
         .post("http://192.168.11.8:2226/upload")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "upload failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
+    Ok(())
+}
+
+pub fn mkdir(
+    filename: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    let req = MkdirRequest {
+        filename: filename.to_string(),
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    println!(
+        "upload foldername={}",
+        filename,
+    );
+
+    let response = client
+        .post("http://192.168.11.8:2226/mkdir")
         .json(&req)
         .send()?;
 

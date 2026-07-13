@@ -377,7 +377,18 @@ impl Filesystem for MyFS {
 
         let name = name.to_string_lossy().to_string();
 
-        let ino = self.get_inode(&name);
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_path,
+                    name.to_string()
+                )
+            };
+
+        let ino = self.get_inode(&path);
 
         let attr = FileAttr {
             ino,
@@ -418,17 +429,6 @@ impl Filesystem for MyFS {
                 println!("index update failed: {}", e);
             }
         }
-
-        let path =
-            if parent_path.is_empty() {
-                name.to_string().to_string()
-            } else {
-                format!(
-                    "{}/{}",
-                    parent_path,
-                    name.to_string()
-                )
-            };
 
         let path_token = crypto::make_token("oreore-key", &path);
         match server_api::upload(
@@ -572,6 +572,106 @@ impl Filesystem for MyFS {
             }
 
         reply.written(data.len() as u32);
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        println!(
+            "mkdir(parent={}, name={:?})",
+            parent,
+            name,
+        );
+
+        let parent_path =
+            match self.inode_to_query.get(&parent) {
+                Some(q) => q.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+        let name = name.to_string_lossy().to_string();
+
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_path,
+                    name.to_string()
+                )
+            };
+
+        let ino = self.get_inode(&path);
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
+        let mut parent_token =
+            if parent_path.is_empty() {
+                ".".to_string()
+            } else {
+                parent_path.clone()
+            };
+
+        parent_token = crypto::make_token("oreore-key", &parent_token);
+        let ciphertext = crypto::encrypt(&name);
+
+        match server_api::add_index(
+            &parent_token,
+            &ciphertext,
+        ) {
+            Ok(_) => {
+                println!("index updated");
+            }
+            Err(e) => {
+                println!("index update failed: {}", e);
+            }
+        }
+
+        let path_token = crypto::make_token("oreore-key", &path);
+        match server_api::mkdir(
+            &path_token,
+        ) {
+            Ok(_) => {
+                println!("upload ok");
+            }
+            Err(e) => {
+                println!("upload failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        reply.entry(
+            &TTL,
+            &attr,
+            0,
+        );
     }
 
     fn unlink(
