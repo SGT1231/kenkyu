@@ -377,7 +377,18 @@ impl Filesystem for MyFS {
 
         let name = name.to_string_lossy().to_string();
 
-        let ino = self.get_inode(&name);
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_path,
+                    name.to_string()
+                )
+            };
+
+        let ino = self.get_inode(&path);
 
         let attr = FileAttr {
             ino,
@@ -418,17 +429,6 @@ impl Filesystem for MyFS {
                 println!("index update failed: {}", e);
             }
         }
-
-        let path =
-            if parent_path.is_empty() {
-                name.to_string().to_string()
-            } else {
-                format!(
-                    "{}/{}",
-                    parent_path,
-                    name.to_string()
-                )
-            };
 
         let path_token = crypto::make_token("oreore-key", &path);
         match server_api::upload(
@@ -574,6 +574,106 @@ impl Filesystem for MyFS {
         reply.written(data.len() as u32);
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        println!(
+            "mkdir(parent={}, name={:?})",
+            parent,
+            name,
+        );
+
+        let parent_path =
+            match self.inode_to_query.get(&parent) {
+                Some(q) => q.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            };
+
+        let name = name.to_string_lossy().to_string();
+
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}/{}",
+                    parent_path,
+                    name.to_string()
+                )
+            };
+
+        let ino = self.get_inode(&path);
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
+        let mut parent_token =
+            if parent_path.is_empty() {
+                ".".to_string()
+            } else {
+                parent_path.clone()
+            };
+
+        parent_token = crypto::make_token("oreore-key", &parent_token);
+        let ciphertext = crypto::encrypt(&name);
+
+        match server_api::add_index(
+            &parent_token,
+            &ciphertext,
+        ) {
+            Ok(_) => {
+                println!("index updated");
+            }
+            Err(e) => {
+                println!("index update failed: {}", e);
+            }
+        }
+
+        let path_token = crypto::make_token("oreore-key", &path);
+        match server_api::mkdir(
+            &path_token,
+        ) {
+            Ok(_) => {
+                println!("upload ok");
+            }
+            Err(e) => {
+                println!("upload failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        reply.entry(
+            &TTL,
+            &attr,
+            0,
+        );
+    }
+
     fn unlink(
         &mut self,
         _req: &Request<'_>,
@@ -618,6 +718,123 @@ impl Filesystem for MyFS {
             );
 
         
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            parent_token
+        );
+
+        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let mut enc_name = String::new();
+        for enc in result.files {
+            if crypto::decrypt(&enc) == name {
+                enc_name = enc;
+                break;
+            }
+        }
+        println!("enc_name = {}", enc_name);
+
+        match server_api::delete(
+            &parent_token,
+            &enc_name,
+            &path_token,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("delete failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        if let Some(ino) = self.query_to_inode.remove(&path) {
+            self.inode_to_query.remove(&ino);
+        }
+
+        reply.ok();
+    }
+
+    fn rmdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        println!(
+            "rmdir(parent={}, name={:?})",
+            parent,
+            name,
+        );
+
+        let parent_path = match self.inode_to_query.get(&parent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let name = name.to_string_lossy().to_string();
+
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", parent_path, name)
+            };
+
+        let parent_token =
+            if parent_path.is_empty() {
+                crypto::make_token("oreore-key", ".")
+            } else {
+                crypto::make_token("oreore-key", &parent_path)
+            };
+
+        let path_token =
+            crypto::make_token(
+                "oreore-key",
+                &path,
+            );
+
+        // ディレクトリ内が空か確認
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            path_token,
+        );
+
+        let result: server_api::SearchResult =
+            match reqwest::blocking::get(&url) {
+                Ok(res) => match res.json() {
+                    Ok(json) => json,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        if !result.files.is_empty() {
+            reply.error(libc::ENOTEMPTY);
+            return;
+        }
+
         let url = format!(
             "http://192.168.11.8:2226/search?token={}",
             parent_token
