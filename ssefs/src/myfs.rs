@@ -766,6 +766,123 @@ impl Filesystem for MyFS {
         reply.ok();
     }
 
+    fn rmdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        println!(
+            "rmdir(parent={}, name={:?})",
+            parent,
+            name,
+        );
+
+        let parent_path = match self.inode_to_query.get(&parent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let name = name.to_string_lossy().to_string();
+
+        let path =
+            if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", parent_path, name)
+            };
+
+        let parent_token =
+            if parent_path.is_empty() {
+                crypto::make_token("oreore-key", ".")
+            } else {
+                crypto::make_token("oreore-key", &parent_path)
+            };
+
+        let path_token =
+            crypto::make_token(
+                "oreore-key",
+                &path,
+            );
+
+        // ディレクトリ内が空か確認
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            path_token,
+        );
+
+        let result: server_api::SearchResult =
+            match reqwest::blocking::get(&url) {
+                Ok(res) => match res.json() {
+                    Ok(json) => json,
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+        if !result.files.is_empty() {
+            reply.error(libc::ENOTEMPTY);
+            return;
+        }
+
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            parent_token
+        );
+
+        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let mut enc_name = String::new();
+        for enc in result.files {
+            if crypto::decrypt(&enc) == name {
+                enc_name = enc;
+                break;
+            }
+        }
+        println!("enc_name = {}", enc_name);
+
+        match server_api::delete(
+            &parent_token,
+            &enc_name,
+            &path_token,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("delete failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        if let Some(ino) = self.query_to_inode.remove(&path) {
+            self.inode_to_query.remove(&ino);
+        }
+
+        reply.ok();
+    }
+
     fn setattr(
         &mut self,
         _req: &Request<'_>,
