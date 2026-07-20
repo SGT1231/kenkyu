@@ -20,6 +20,7 @@ pub struct MyFS {
     pub next_inode: u64,
     pub inode_to_query: HashMap<u64, String>,
     pub query_to_inode: HashMap<String, u64>,
+    pub ssefs_gid: u32,  // ssefsグループID
 }
 
 impl MyFS {
@@ -402,7 +403,7 @@ impl Filesystem for MyFS {
             perm: 0o644,
             nlink: 1,
             uid: 1000,
-            gid: 1000,
+            gid: self.ssefs_gid, // ssefsグループID
             rdev: 0,
             blksize: 512,
             flags: 0,
@@ -625,7 +626,7 @@ impl Filesystem for MyFS {
             perm: 0o755,
             nlink: 2,
             uid: 1000,
-            gid: 1000,
+            gid: self.ssefs_gid, // ssefsグループID
             rdev: 0,
             blksize: 512,
             flags: 0,
@@ -888,12 +889,12 @@ impl Filesystem for MyFS {
         _req: &Request<'_>,
         ino: u64,
         mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
         _fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
@@ -911,7 +912,38 @@ impl Filesystem for MyFS {
             }
         };
 
-        // ファイルサイズ変更処理
+        // サーバーに属性変更を通知
+        let path_token = crypto::make_token("oreore-key", &path);
+        
+        // 時間系のオプションをUNIX時間に変換
+        let atime_unix = atime.map(|t| match t {
+            fuser::TimeOrNow::SpecificTime(st) => st.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            fuser::TimeOrNow::Now => SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+        });
+        
+        let mtime_unix = mtime.map(|t| match t {
+            fuser::TimeOrNow::SpecificTime(st) => st.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            fuser::TimeOrNow::Now => SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+        });
+        
+        let ctime_unix = ctime.map(|st| st.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64);
+
+        if let Err(e) = server_api::setattr(
+            &path_token,
+            mode,
+            uid,
+            gid,
+            atime_unix,
+            mtime_unix,
+            ctime_unix,
+            size,
+        ) {
+            println!("setattr failed: {}", e);
+            reply.error(libc::EIO);
+            return;
+        }
+
+        // ファイルサイズ変更処理（古い方法での互換性維持）
         if let Some(new_size) = size {
             println!("truncate -> {}", new_size);
 
@@ -938,6 +970,19 @@ impl Filesystem for MyFS {
             }
         }
 
+        // モード（権限）変更処理（古い方法での互換性維持）
+        if let Some(new_mode) = mode {
+            println!("chmod -> {:o}", new_mode);
+            
+            // サーバー側にモード変更を通知
+            let path_token = crypto::make_token("oreore-key", &path);
+            if let Err(e) = server_api::chmod(&path_token, new_mode) {
+                println!("chmod failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
         // ファイルの属性情報を取得
         let path_token = crypto::make_token("oreore-key", &path);
         let stat_result: server_api::StatResult = match reqwest::blocking::get(&format!(
@@ -957,20 +1002,6 @@ impl Filesystem for MyFS {
             }
         };
 
-        // モード（権限）変更処理
-        let mut new_perm = stat_result.mode as u16;
-        if let Some(new_mode) = mode {
-            new_perm = new_mode as u16;
-            println!("chmod -> {:o}", new_mode);
-            
-            // サーバー側にモード変更を通知
-            if let Err(e) = server_api::chmod(&path_token, new_mode) {
-                println!("chmod failed: {}", e);
-                reply.error(libc::EIO);
-                return;
-            }
-        }
-
         let kind = if stat_result.is_dir {
             FileType::Directory
         } else {
@@ -986,7 +1017,7 @@ impl Filesystem for MyFS {
             ctime: UNIX_EPOCH + Duration::from_secs(stat_result.ctime as u64),
             crtime: UNIX_EPOCH + Duration::from_secs(stat_result.ctime as u64),
             kind,
-            perm: new_perm,
+            perm: stat_result.mode as u16,
             nlink: stat_result.nlink,
             uid: stat_result.uid,
             gid: stat_result.gid,
