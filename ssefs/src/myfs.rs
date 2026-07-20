@@ -887,7 +887,7 @@ impl Filesystem for MyFS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _mode: Option<u32>,
+        mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
@@ -903,42 +903,33 @@ impl Filesystem for MyFS {
     ) {
         println!("setattr({})", ino);
 
-        if let Some(new_size) = size {
+        let path = match self.inode_to_query.get(&ino) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
 
+        // ファイルサイズ変更処理
+        if let Some(new_size) = size {
             println!("truncate -> {}", new_size);
 
-            let path =
-                match self.inode_to_query.get(&ino) {
-                    Some(q) => q.clone(),
-                    None => {
-                        reply.error(libc::ENOENT);
-                        return;
-                    }
-                };
+            let path_token = crypto::make_token("oreore-key", &path);
 
-            let path_token =
-                crypto::make_token(
-                    "oreore-key",
-                    &path,
-                );
-
-            let mut content =
-                match server_api::download(&path_token) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        reply.error(libc::EIO);
-                        return;
-                    }
-                };
+            let mut content = match server_api::download(&path_token) {
+                Ok(v) => v,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
                 
             content.resize(new_size as usize, 0);
 
             let encrypted = crypto::encrypt_bytes(&content);
 
-            match server_api::upload(
-                &path_token,
-                &encrypted,
-            ) {
+            match server_api::upload(&path_token, &encrypted) {
                 Ok(_) => {}
                 Err(_) => {
                     reply.error(libc::EIO);
@@ -947,23 +938,63 @@ impl Filesystem for MyFS {
             }
         }
 
+        // ファイルの属性情報を取得
+        let path_token = crypto::make_token("oreore-key", &path);
+        let stat_result: server_api::StatResult = match reqwest::blocking::get(&format!(
+            "http://192.168.11.8:2226/stat?token={}",
+            path_token
+        )) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        // モード（権限）変更処理
+        let mut new_perm = stat_result.mode as u16;
+        if let Some(new_mode) = mode {
+            new_perm = new_mode as u16;
+            println!("chmod -> {:o}", new_mode);
+            
+            // サーバー側にモード変更を通知
+            if let Err(e) = server_api::chmod(&path_token, new_mode) {
+                println!("chmod failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        let kind = if stat_result.is_dir {
+            FileType::Directory
+        } else {
+            FileType::RegularFile
+        };
+
         let attr = FileAttr {
             ino,
-            size: 0,
-            blocks: 0,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
-            kind: FileType::RegularFile,
-            perm: 0o644,
-            nlink: 1,
-            uid: 1000,
-            gid: 1000,
-            rdev: 0,
-            blksize: 512,
+            size: stat_result.size,
+            blocks: stat_result.blocks,
+            atime: UNIX_EPOCH + Duration::from_secs(stat_result.atime as u64),
+            mtime: UNIX_EPOCH + Duration::from_secs(stat_result.mtime as u64),
+            ctime: UNIX_EPOCH + Duration::from_secs(stat_result.ctime as u64),
+            crtime: UNIX_EPOCH + Duration::from_secs(stat_result.ctime as u64),
+            kind,
+            perm: new_perm,
+            nlink: stat_result.nlink,
+            uid: stat_result.uid,
+            gid: stat_result.gid,
+            rdev: stat_result.rdev,
+            blksize: stat_result.blksize,
             flags: 0,
         };
+        
         reply.attr(&TTL, &attr);
     }
 }

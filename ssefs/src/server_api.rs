@@ -51,6 +51,12 @@ struct DeleteRequest {
     path_token: String,
 }
 
+#[derive(Serialize)]
+struct ChmodRequest {
+    token: String,
+    mode: u32,
+}
+
 use crate::crypto;
 
 pub fn add_index(
@@ -69,6 +75,35 @@ pub fn add_index(
         .post("http://192.168.11.8:2226/add")
         .json(&req)
         .send()?;
+
+    Ok(())
+}
+
+pub fn chmod(
+    token: &str,
+    mode: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = ChmodRequest {
+        token: token.to_string(),
+        mode,
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/chmod")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "chmod failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
 
     Ok(())
 }
