@@ -57,6 +57,18 @@ struct ChmodRequest {
     mode: u32,
 }
 
+#[derive(Serialize)]
+struct SetattrRequest {
+    token: String,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    atime: Option<i64>,
+    mtime: Option<i64>,
+    ctime: Option<i64>,
+    size: Option<u64>,
+}
+
 use crate::crypto;
 
 pub fn add_index(
@@ -75,6 +87,47 @@ pub fn add_index(
         .post("http://192.168.11.8:2226/add")
         .json(&req)
         .send()?;
+
+    Ok(())
+}
+
+pub fn setattr(
+    token: &str,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    atime: Option<i64>,
+    mtime: Option<i64>,
+    ctime: Option<i64>,
+    size: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = SetattrRequest {
+        token: token.to_string(),
+        mode,
+        uid,
+        gid,
+        atime,
+        mtime,
+        ctime,
+        size,
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/setattr")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "setattr failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
 
     Ok(())
 }
