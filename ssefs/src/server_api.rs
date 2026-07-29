@@ -12,11 +12,13 @@ struct AddRequest {
 struct UploadRequest {
     filename: String,
     content: String,
+    gid: u32,
 }
 
 #[derive(Serialize)]
 struct MkdirRequest {
     filename: String,
+    gid: u32,
 }
 
 #[derive(Deserialize)]
@@ -52,12 +54,6 @@ struct DeleteRequest {
 }
 
 #[derive(Serialize)]
-struct ChmodRequest {
-    token: String,
-    mode: u32,
-}
-
-#[derive(Serialize)]
 struct SetattrRequest {
     token: String,
     mode: Option<u32>,
@@ -67,6 +63,19 @@ struct SetattrRequest {
     mtime: Option<i64>,
     ctime: Option<i64>,
     size: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct RemoveIndexRequest {
+    parent_token: String,
+    ciphertext: String,
+}
+
+#[derive(Serialize)]
+struct RenameRequest {
+    old_path_token: String,
+    new_path_token: String,
+    is_dir: bool,
 }
 
 use crate::crypto;
@@ -132,51 +141,25 @@ pub fn setattr(
     Ok(())
 }
 
-pub fn chmod(
-    token: &str,
-    mode: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let req = ChmodRequest {
-        token: token.to_string(),
-        mode,
-    };
-
-    let client = reqwest::blocking::Client::new();
-
-    let response = client
-        .post("http://192.168.11.8:2226/chmod")
-        .json(&req)
-        .send()?;
-
-    if !response.status().is_success() {
-        return Err(
-            format!(
-                "chmod failed: {}",
-                response.status()
-            )
-            .into(),
-        );
-    }
-
-    Ok(())
-}
-
 pub fn upload(
     filename: &str,
     content: &str,
+    gid: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let req = UploadRequest {
         filename: filename.to_string(),
         content: content.to_string(),
+        gid,
     };
 
     let client = reqwest::blocking::Client::new();
 
     println!(
-        "upload filename={} content={:?}",
+        "upload filename={} content={:?} gid={}",
         filename,
         content,
+        gid,
     );
 
     let response = client
@@ -199,17 +182,20 @@ pub fn upload(
 
 pub fn mkdir(
     filename: &str,
+    gid: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let req = MkdirRequest {
         filename: filename.to_string(),
+        gid,
     };
 
     let client = reqwest::blocking::Client::new();
 
     println!(
-        "upload foldername={}",
+        "upload foldername={} gid={}",
         filename,
+        gid,
     );
 
     let response = client
@@ -284,6 +270,66 @@ pub fn delete(
         return Err(
             format!(
                 "delete failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
+    Ok(())
+}
+
+pub fn remove_index(
+    parent_token: &str,
+    ciphertext: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = RemoveIndexRequest {
+        parent_token: parent_token.to_string(),
+        ciphertext: ciphertext.to_string(),
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/remove_index")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "remove_index failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
+    Ok(())
+}
+
+pub fn rename(
+    old_path_token: &str,
+    new_path_token: &str,
+    is_dir: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = RenameRequest {
+        old_path_token: old_path_token.to_string(),
+        new_path_token: new_path_token.to_string(),
+        is_dir,
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/rename")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "rename failed: {}",
                 response.status()
             )
             .into(),
