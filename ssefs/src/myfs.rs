@@ -435,6 +435,7 @@ impl Filesystem for MyFS {
         match server_api::upload(
             &path_token,
             "",
+            self.ssefs_gid,
         ) {
             Ok(_) => {
                 println!("upload ok");
@@ -564,6 +565,7 @@ impl Filesystem for MyFS {
         match server_api::upload(
                 &path_token,
                 &encrypted,
+                self.ssefs_gid,
             ) {
                 Ok(_) => {}
                 Err(_) => {
@@ -657,6 +659,7 @@ impl Filesystem for MyFS {
         let path_token = crypto::make_token("oreore-key", &path);
         match server_api::mkdir(
             &path_token,
+            self.ssefs_gid,
         ) {
             Ok(_) => {
                 println!("upload ok");
@@ -961,25 +964,12 @@ impl Filesystem for MyFS {
 
             let encrypted = crypto::encrypt_bytes(&content);
 
-            match server_api::upload(&path_token, &encrypted) {
+            match server_api::upload(&path_token, &encrypted, self.ssefs_gid) {
                 Ok(_) => {}
                 Err(_) => {
                     reply.error(libc::EIO);
                     return;
                 }
-            }
-        }
-
-        // モード（権限）変更処理（古い方法での互換性維持）
-        if let Some(new_mode) = mode {
-            println!("chmod -> {:o}", new_mode);
-            
-            // サーバー側にモード変更を通知
-            let path_token = crypto::make_token("oreore-key", &path);
-            if let Err(e) = server_api::chmod(&path_token, new_mode) {
-                println!("chmod failed: {}", e);
-                reply.error(libc::EIO);
-                return;
             }
         }
 
@@ -1027,5 +1017,207 @@ impl Filesystem for MyFS {
         };
         
         reply.attr(&TTL, &attr);
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        println!(
+            "rename(parent={}, name={:?}, newparent={}, newname={:?})",
+            parent,
+            name,
+            newparent,
+            newname,
+        );
+
+        //
+        // 1. 移動元・移動先のパスを取得
+        //
+        let old_parent_path = match self.inode_to_query.get(&parent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let new_parent_path = match self.inode_to_query.get(&newparent) {
+            Some(q) => q.clone(),
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let old_name = name.to_string_lossy().to_string();
+        let new_name = newname.to_string_lossy().to_string();
+
+        let old_path = if old_parent_path.is_empty() {
+            old_name.clone()
+        } else {
+            format!("{}/{}", old_parent_path, old_name)
+        };
+
+        let new_path = if new_parent_path.is_empty() {
+            new_name.clone()
+        } else {
+            format!("{}/{}", new_parent_path, new_name)
+        };
+
+        //
+        // 2. 移動元ディレクトリのインデックスを検索し、old_ciphertext を取得
+        //
+        let old_parent_token = if old_parent_path.is_empty() {
+            crypto::make_token("oreore-key", ".")
+        } else {
+            crypto::make_token("oreore-key", &old_parent_path)
+        };
+
+        let url = format!(
+            "http://192.168.11.8:2226/search?token={}",
+            old_parent_token
+        );
+
+        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let mut old_ciphertext = String::new();
+        for enc in &result.files {
+            if crypto::decrypt(enc) == old_name {
+                old_ciphertext = enc.clone();
+                break;
+            }
+        }
+
+        if old_ciphertext.is_empty() {
+            reply.error(libc::ENOENT);
+            return;
+        }
+
+        //
+        // 3. 移動元ディレクトリから削除
+        //
+        match server_api::remove_index(&old_parent_token, &old_ciphertext) {
+            Ok(_) => {
+                println!("removed from old parent index");
+            }
+            Err(e) => {
+                println!("remove_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        //
+        // 4. 移動先ディレクトリへ登録
+        //
+        let new_parent_token = if new_parent_path.is_empty() {
+            crypto::make_token("oreore-key", ".")
+        } else {
+            crypto::make_token("oreore-key", &new_parent_path)
+        };
+
+        let new_ciphertext = crypto::encrypt(&new_name);
+
+        match server_api::add_index(&new_parent_token, &new_ciphertext) {
+            Ok(_) => {
+                println!("added to new parent index");
+            }
+            Err(e) => {
+                println!("add_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        //
+        // 5. 対象がディレクトリかどうか確認
+        //
+        let old_path_token = crypto::make_token("oreore-key", &old_path);
+
+        let url = format!(
+            "http://192.168.11.8:2226/stat?token={}",
+            old_path_token
+        );
+
+        let stat_result: server_api::StatResult = match reqwest::blocking::get(&url) {
+            Ok(res) => match res.json() {
+                Ok(json) => json,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let is_dir = stat_result.is_dir;
+
+        //
+        // 6. 実データをリネーム
+        //
+        let new_path_token = crypto::make_token("oreore-key", &new_path);
+
+        match server_api::rename(&old_path_token, &new_path_token, is_dir) {
+            Ok(_) => {
+                println!("server rename ok");
+            }
+            Err(e) => {
+                println!("server rename failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        //
+        // 7. FUSE側の管理情報を更新
+        //    old_path から始まるすべてのパスを new_path に置換
+        //
+        let old_prefix = format!("{}/", old_path);
+        let new_prefix = format!("{}/", new_path);
+
+        // まず old_path 自身を更新
+        if let Some(ino) = self.query_to_inode.remove(&old_path) {
+            self.query_to_inode.insert(new_path.clone(), ino);
+            self.inode_to_query.insert(ino, new_path.clone());
+        }
+
+        // 子孫のパスも更新
+        let entries_to_update: Vec<(String, u64)> = self
+            .query_to_inode
+            .iter()
+            .filter(|(path, _)| path.starts_with(&old_prefix))
+            .map(|(path, &ino)| (path.clone(), ino))
+            .collect();
+
+        for (old_child_path, ino) in entries_to_update {
+            let new_child_path = old_child_path.replacen(&old_prefix, &new_prefix, 1);
+            self.query_to_inode.remove(&old_child_path);
+            self.query_to_inode.insert(new_child_path.clone(), ino);
+            self.inode_to_query.insert(ino, new_child_path);
+        }
+
+        reply.ok();
     }
 }
