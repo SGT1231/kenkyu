@@ -51,8 +51,8 @@
 ③ nameをAES<br>
 <font color=green>④ サーバ側でindexディレクトリにparent_tokenとenc_nameを登録</font><br>
 ⑤ parent_path＋nameでpath生成<br>
-⑥ pathを**ハッシュ化**して，upload APIを飛ばす<br>
-<font color=green>⑦ サーバ側でfilesディレクトリにファイルを置く</font><br>
+⑥ pathを**ハッシュ化**して，upload APIを飛ばす（ssefs_gidも送信）<br>
+<font color=green>⑦ サーバ側でfilesディレクトリにファイルを置き，オーナーID=1000、グループID=クライアント指定のGIDに設定</font><br>
 
 #### read()
 ファイルの中身を読む<br>
@@ -67,8 +67,8 @@
 ② download APIを飛ばす<br>
 <font color=green>③ サーバ側でfilesディレクトリを見る．pathに一致するファイルの中身を返す</font><br>
 ④ AESを復号する．<br>
-⑤ 追記するデータをAESで暗号化．ハッシュ化したpathとともにupload APIを飛ばす<br>
-<font color=green>⑦ サーバ側でfilesディレクトリにあるファイルに追記する</font><br>
+⑤ 追記するデータをAESで暗号化．ハッシュ化したpathとともにupload APIを飛ばす（ssefs_gidも送信）<br>
+<font color=green>⑦ サーバ側でfilesディレクトリにあるファイルに追記し，オーナーID=1000、グループID=クライアント指定のGIDに設定</font><br>
 
 #### mkdir()
 フォルダ作成，createとほとんど一緒<br>
@@ -77,8 +77,9 @@
 ③ nameをAES<br>
 <font color=green>④ サーバ側でindexディレクトリにparent_tokenとenc_nameを登録</font><br>
 ⑤ parent_path＋nameでpath生成<br>
-⑥ pathを**ハッシュ化**して，mkdir APIを飛ばす<br>
-<font color=green>⑦ サーバ側でfilesディレクトリにフォルダを置く．空のインデックスも生成．</font><br>
+⑥ pathを**ハッシュ化**して，mkdir APIを飛ばす（ssefs_gidも送信）<br>
+<font color=green>⑦ サーバ側でfilesディレクトリにフォルダを置き，空のインデックスも生成．<br>
+　 オーナーID=1000、グループID=クライアント指定のGIDに設定．</font><br>
 
 #### unlink()
 ファイルのinodeのリンク削除<br>
@@ -112,4 +113,36 @@ Linuxでは後ろ部分のファイル削除は，ファイルサイズを変更
 ① pathを取得，**ハッシュ化**<br>
 ② download APIを飛ばす<br>
 ③ 返ってきたファイルのサイズを変更<br>
-④ それをAESで暗号化し，path_tokenと共にupload APIを飛ばす<br>
+④ それをAESで暗号化し，path_tokenと共にupload APIを飛ばす（ssefs_gidも送信）<br>
+<font color=green>⑤ サーバ側でfilesディレクトリにあるファイルに追記し，オーナーID=1000、グループID=クライアント指定のGIDに設定</font><br>
+
+#### rename()
+ファイル・ディレクトリのリネーム・移動<br>
+① parent_path，new_parent_path，name，new_nameを取得<br>
+② old_parent_pathを**ハッシュ化**<br>
+③ search APIを飛ばす<br>
+<font color=green>④ サーバ側でindexディレクトリを見る，一致するものの中身を返す</font><br>
+⑤ 結果がAESで返ってくる<br>
+⑥ 復号してold_nameと一致するものをold_ciphertextとする<br>
+⑦ old_parent_tokenとold_ciphertextを使って，remove_index APIを飛ばす<br>
+<font color=green>⑧ サーバ側でindexディレクトリのparent_tokenに一致するファイル内の，ciphertextに一致するものを削除．</font><br>
+⑨ new_parent_pathを**ハッシュ化**<br>
+⑩ new_nameをAESで暗号化し，new_parent_tokenと共にadd_index APIを飛ばす<br>
+<font color=green>⑪ サーバ側でindexディレクトリにparent_tokenとciphertextを登録</font><br>
+⑫ old_pathを**ハッシュ化**してstat APIを飛ばし，ディレクトリかどうか確認<br>
+⑬ old_path，new_pathをそれぞれ**ハッシュ化**して，rename APIを飛ばす<br>
+<font color=green>⑭ サーバ側でfilesディレクトリのold_path_tokenをnew_path_tokenにリネーム．<br>
+　 ディレクトリの場合はindexディレクトリのold_path_tokenもnew_path_tokenにリネーム．</font><br>
+⑮ FUSE側の管理情報（query_to_inode，inode_to_query）をold_pathからnew_pathへ更新．子孫パスも同様に更新．<br>
+
+### server_api.rs
+#### remove_index()
+インデックスから特定の暗号文エントリを削除<br>
+① parent_tokenとciphertextをサーバへ送信<br>
+<font color=green>② サーバ側でindexディレクトリのparent_tokenに一致するファイルを読み込み，ciphertextに一致する行を削除して書き戻す</font><br>
+
+#### rename()
+サーバ側の実データをリネーム<br>
+① old_path_tokenとnew_path_token，is_dirをサーバへ送信<br>
+<font color=green>② サーバ側でfilesディレクトリのold_path_tokenをnew_path_tokenにos.Rename()<br>
+③ is_dirがtrueの場合，indexディレクトリのold_path_tokenもnew_path_tokenにos.Rename()</font><br>
