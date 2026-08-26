@@ -12,6 +12,7 @@ const ROOT_INO: u64 = 1;
 mod crypto;
 mod server_api;
 mod myfs;
+mod key_manager;
 
 // ssefsグループのIDを取得する関数
 fn get_ssefs_group_id() -> u32 {
@@ -88,6 +89,12 @@ fn get_ssefs_group_id() -> u32 {
 use myfs::MyFS;
 
 fn main() {
+    // マスター鍵を初期化（.config/ssefs/master.key から読み込み or 生成）
+    if let Err(e) = key_manager::init() {
+        eprintln!("Failed to initialize master key: {}", e);
+        std::process::exit(1);
+    }
+
     // ssefsグループのIDを取得
     let ssefs_gid = get_ssefs_group_id();
     
