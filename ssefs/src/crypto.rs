@@ -17,7 +17,7 @@ use base64::{
 
 use rand::RngCore;
 
-const KEY: [u8; 32] = *b"01234567890123456789012345678901";
+use crate::key_manager;
 
 pub fn make_token(
     secret: &str,
@@ -45,8 +45,9 @@ pub fn encrypt_bytes(
     file: &[u8],
 ) -> String {
 
+    let key = key_manager::get_key();
     let cipher =
-        Aes256Gcm::new_from_slice(&KEY)
+        Aes256Gcm::new_from_slice(key)
             .unwrap();
 
     let mut nonce_bytes = [0u8; 12];
@@ -84,8 +85,9 @@ pub fn decrypt(
     let (nonce_bytes, ciphertext) =
         data.split_at(12);
 
+    let key = key_manager::get_key();
     let cipher =
-        Aes256Gcm::new_from_slice(&KEY)
+        Aes256Gcm::new_from_slice(key)
             .unwrap();
 
     let nonce =
