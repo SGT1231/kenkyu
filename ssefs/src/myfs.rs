@@ -13,14 +13,17 @@ use std::collections::HashMap;
 
 use crate::crypto;
 use crate::server_api;
+use crate::keyword_state::{DirMap, KeywordState};
+use crate::key_manager;
 
-const TTL: Duration = Duration::from_secs(60);
+const TTL: Duration = Duration::from_secs(0);
 
 pub struct MyFS {
     pub next_inode: u64,
     pub inode_to_query: HashMap<u64, String>,
     pub query_to_inode: HashMap<String, u64>,
-    pub ssefs_gid: u32,  // ssefsグループID
+    pub ssefs_gid: u32,
+    pub dir_map: DirMap,
 }
 
 impl MyFS {
@@ -36,6 +39,151 @@ impl MyFS {
         self.inode_to_query.insert(ino, query.to_string());
 
         return ino;
+    }
+
+    /// 指定ディレクトリパスに対する暗号化エントリ名を検索・復号して返す
+    fn search_directory(&mut self, path: &str) -> Result<Vec<String>, i32> {
+        let keyword_id = match self.dir_map.path_to_keyword.get(path) {
+            Some(kw) => kw.clone(),
+            None => return Ok(Vec::new()), // キーワード未登録 → 空ディレクトリ
+        };
+
+        let state = match self.dir_map.get_state(&keyword_id) {
+            Some(s) => s.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        if state.counter == 0 {
+            return Ok(Vec::new());
+        }
+
+        let master_key = key_manager::get_key();
+        let dk = crypto::derive_dk(master_key, &keyword_id);
+
+        let result = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
+            Ok(r) => r,
+            Err(_) => return Err(libc::EIO),
+        };
+
+        let mut names = Vec::new();
+        for encrypted_name in &result.files {
+            let plain = crypto::decrypt(encrypted_name);
+            if !plain.is_empty() {
+                names.push(plain);
+            }
+        }
+        println!(
+            "[search_directory] path={}, keyword_id={}, counter={}",
+            path,
+            keyword_id,
+            state.counter
+        );
+
+        println!(
+            "[search_directory] latest_st={}",
+            state.latest_st
+        );
+
+        println!(
+            "[search_directory] server returned {} files",
+            result.files.len()
+        );
+
+        for (i, encrypted_name) in result.files.iter().enumerate() {
+            let plain = crypto::decrypt(encrypted_name);
+            println!(
+                "[search_directory] result[{}] = {:?}",
+                i,
+                plain
+            );
+        }
+
+        Ok(names)
+    }
+
+    /// 指定ディレクトリの ST を1世代進め、UT を生成して返す
+    /// 返り値: (keyword_id, ut)
+    fn advance_st_and_get_ut(&mut self, path: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+        let keyword_id = self.dir_map.get_or_create_keyword(path);
+        let master_key = key_manager::get_key();
+        let n = key_manager::get_tdp_n();
+        let d = key_manager::get_tdp_d();
+
+        let keyword_id_clone = keyword_id.clone();
+        let mut state = self.dir_map.get_state(&keyword_id_clone)
+            .cloned()
+            .unwrap_or(KeywordState { counter: 0, latest_st: String::new() });
+
+        let new_st = if state.counter == 0 {
+            crypto::st_init(master_key, &keyword_id, &n)
+        } else {
+            let current = crypto::base64_to_biguint(&state.latest_st)
+                .ok_or("Invalid latest_st")?;
+            crypto::st_next(&current, &d, &n)
+        };
+
+        let dk = crypto::derive_dk(master_key, &keyword_id);
+        let ut = crypto::derive_ut(&dk, &new_st);
+
+        state.latest_st = crypto::biguint_to_base64(&new_st);
+        state.counter += 1;
+
+        self.dir_map.update_state(&keyword_id, state);
+        self.dir_map.save()?;
+
+        Ok((keyword_id, ut))
+    }
+
+    /// 指定ディレクトリ内から target_name に一致するエントリの UT を探索して返す
+    fn find_ut_for_entry(&mut self, parent_path: &str, target_name: &str) -> Result<Option<String>, i32> {
+        let keyword_id = match self.dir_map.path_to_keyword.get(parent_path) {
+            Some(kw) => kw.clone(),
+            None => return Ok(None),
+        };
+        let state = match self.dir_map.get_state(&keyword_id) {
+            Some(s) => s.clone(),
+            None => return Ok(None),
+        };
+        if state.counter == 0 {
+            return Ok(None);
+        }
+
+        let master_key = key_manager::get_key();
+        let dk = crypto::derive_dk(master_key, &keyword_id);
+
+        let result = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
+            Ok(r) => r,
+            Err(_) => return Err(libc::EIO),
+        };
+
+        let ciphertext = crypto::encrypt(target_name);
+        for enc in &result.files {
+            if enc == &ciphertext {
+                // server_api::search はファイル名を返すだけなので UT は直接的に返されない。
+                // Phase 3 では O(counter) 探索でクライアント側でも UT を再導出できる。
+                // ここでは ut_cache を信頼し、なければ cache miss として server 側の
+                // get_by_ut を使う方針は採用しない。
+                // 代わりに、client 側で ST chain をたどり UT を再計算して特定する。
+                let n = key_manager::get_tdp_n();
+                let e = key_manager::get_tdp_e();
+                let mut st = crypto::base64_to_biguint(&state.latest_st)
+                    .ok_or(libc::EIO)?;
+                // 最新から逆方向（counter 分）たどる
+                // サーバ側は eval(st^e) で過去へ進む。クライアントも同じ。
+                println!("counter = {}", state.counter);
+                for _ in 0..state.counter {
+                    let ut = crypto::derive_ut(&dk, &st);
+                    // この UT に対応するエントリがサーバにあるか get_by_ut で確認
+                    match server_api::get_by_ut(&ut) {
+                        Ok(Some(val)) if val == *enc => return Ok(Some(ut)),
+                        _ => {}
+                    }
+                    st = st.modpow(&e, &n); // TDP eval: 過去へ
+                }
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -62,51 +210,19 @@ impl Filesystem for MyFS {
             }
         };
 
-        //
-        // 親ディレクトリを検索
-        //
-        let parent_token =
-            if parent_path.is_empty() {
-                ".".to_string()
-            } else {
-                parent_path.clone()
-            };
-
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            crypto::make_token("oreore-key", &parent_token),
-        );
-
-        let result: server_api::SearchResult =
-            match reqwest::blocking::get(&url) {
-                Ok(res) => match res.json() {
-                    Ok(json) => json,
-                    Err(_) => {
-                        reply.error(libc::EIO);
-                        return;
-                    }
-                },
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            };
-
-        //
-        // lookup対象名
-        //
         let target_name = name.to_string_lossy().to_string();
 
-        //
-        // 復号して存在確認
-        //
+        let names = match self.search_directory(&parent_path) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
         let mut found = false;
-
-        for encrypted_name in &result.files {
-
-            let plain_name = crypto::decrypt(encrypted_name);
-
-            if plain_name == target_name {
+        for plain_name in &names {
+            if *plain_name == target_name {
                 found = true;
                 break;
             }
@@ -271,18 +387,13 @@ impl Filesystem for MyFS {
         _req: &Request<'_>,
         ino: u64,
         _fh: u64,
-        _offset: i64,
+        offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        if _offset != 0 {
-            reply.ok();
-            return;
-        }
-        
-        println!("readdir({}, {})", ino, _offset);
+        println!("readdir({}, offset={})", ino, offset);
 
         // inode → query
-        let mut path = match self.inode_to_query.get(&ino) {
+        let path = match self.inode_to_query.get(&ino) {
             Some(q) => q.clone(),
             None => {
                 reply.error(libc::ENOENT);
@@ -290,63 +401,70 @@ impl Filesystem for MyFS {
             }
         };
 
-        // ルートは子ディレクトリを出す
-        if path.is_empty() {
-            path = ".".to_string();
-        }
-
-        // どのinodeでも同じ処理
-        let token = crypto::make_token("oreore-key", &path);
-        println!("token = {}", token);
-
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            token
-        );
-
-        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
-            Ok(res) => match res.json() {
-                Ok(json) => json,
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            },
-            Err(_) => {
-                reply.error(libc::EIO);
+        let names = match self.search_directory(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                reply.error(e);
                 return;
             }
         };
 
-        let _ = reply.add(ino, 1, FileType::Directory, ".");
-        let parent_path =
-            match path.rfind('/') {
-                Some(pos) => &path[..pos],
-                None => "",
-            };
+        // 返すエントリを組み立てる（offset ベースの再開に対応）
+        let mut entries: Vec<(u64, FileType, String)> = Vec::new();
+        entries.push((ino, FileType::Directory, ".".to_string()));
 
+        let parent_path = match path.rfind('/') {
+            Some(pos) => &path[..pos],
+            None => "",
+        };
         let parent_ino = self.get_inode(parent_path);
         println!("parent_ino = {}", parent_ino);
-        let _ = reply.add(parent_ino, 2, FileType::Directory, "..");
+        entries.push((parent_ino, FileType::Directory, "..".to_string()));
 
-        let mut offset = 3;
-        for enc_path in result.files {
-            let filename = crypto::decrypt(&enc_path);
-
-            let child_path = format!("{}/{}", path, filename);
+        for filename in names {
+            let child_path = if path.is_empty() {
+                filename.clone()
+            } else {
+                format!("{}/{}", path, filename)
+            };
             let child_ino = self.get_inode(&child_path);
 
-            let _ = reply.add(
-                child_ino,
-                offset,
-                FileType::Directory,
-                filename,
+            let path_token = crypto::make_token("oreore-key", &child_path);
+            let stat_url = format!(
+                "http://192.168.11.8:2226/stat?token={}",
+                path_token
             );
-            offset += 1;
+            let file_type = match reqwest::blocking::get(&stat_url) {
+                Ok(res) => match res.json::<server_api::StatResult>() {
+                    Ok(stat) => if stat.is_dir { FileType::Directory } else { FileType::RegularFile },
+                    Err(_) => FileType::RegularFile,
+                },
+                Err(_) => FileType::RegularFile,
+            };
+
+            entries.push((child_ino, file_type, filename));
         }
 
+        // offset 以降のエントリを返す。
+        // reply.add が true を返したらバッファがいっぱいなので中断する。
+        let mut added = 0usize;
+        for (i, (entry_ino, entry_type, name)) in entries.iter().enumerate().skip(offset as usize) {
+            let next_offset = (i + 1) as i64;
+            if reply.add(*entry_ino, next_offset, *entry_type, name) {
+                println!("readdir buffer full at offset {}", next_offset);
+                break;
+            }
+            added += 1;
+        }
+
+        println!(
+            "readdir entries={}, added={}, started_at_offset={}",
+            entries.len(),
+            added,
+            offset
+        );
+
         reply.ok();
-        return;
     }
 
     fn create(
@@ -409,26 +527,31 @@ impl Filesystem for MyFS {
             flags: 0,
         };
 
-        let mut parent_token =
-            if parent_path.is_empty() {
-                ".".to_string()
-            } else {
-                parent_path.clone()
-            };
+        let ciphertext = crypto::encrypt(&name);
 
-        parent_token = crypto::make_token("oreore-key", &parent_token);
-        let token = crypto::encrypt(&name);
+        let (_keyword_id, ut) = match self.advance_st_and_get_ut(&parent_path) {
+            Ok((kw, ut)) => (kw, ut),
+            Err(e) => {
+                println!("advance ST failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        };
 
-        match server_api::add_index(
-            &parent_token,
-            &token,
-        ) {
+        match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
-                println!("index updated");
+                println!("index updated with ut={}", ut);
             }
             Err(e) => {
-                println!("index update failed: {}", e);
+                println!("add_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
             }
+        }
+
+        self.dir_map.add_ut_cache(&parent_path, &ciphertext, &ut);
+        if let Err(e) = self.dir_map.save() {
+            println!("dir_map save failed: {}", e);
         }
 
         let path_token = crypto::make_token("oreore-key", &path);
@@ -634,26 +757,34 @@ impl Filesystem for MyFS {
             flags: 0,
         };
 
-        let mut parent_token =
-            if parent_path.is_empty() {
-                ".".to_string()
-            } else {
-                parent_path.clone()
-            };
+        // 新しいディレクトリ自身の keyword_id を生成
+        self.dir_map.get_or_create_keyword(&path);
 
-        parent_token = crypto::make_token("oreore-key", &parent_token);
+        // 親ディレクトリのインデックスに新しいディレクトリ名を登録
         let ciphertext = crypto::encrypt(&name);
+        let (_keyword_id, ut) = match self.advance_st_and_get_ut(&parent_path) {
+            Ok((kw, ut)) => (kw, ut),
+            Err(e) => {
+                println!("advance ST failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        };
 
-        match server_api::add_index(
-            &parent_token,
-            &ciphertext,
-        ) {
+        match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
-                println!("index updated");
+                println!("index updated with ut={}", ut);
             }
             Err(e) => {
                 println!("index update failed: {}", e);
+                reply.error(libc::EIO);
+                return;
             }
+        }
+
+        self.dir_map.add_ut_cache(&parent_path, &ciphertext, &ut);
+        if let Err(e) = self.dir_map.save() {
+            println!("dir_map save failed: {}", e);
         }
 
         let path_token = crypto::make_token("oreore-key", &path);
@@ -708,56 +839,47 @@ impl Filesystem for MyFS {
                 format!("{}/{}", parent_path, name)
             };
 
-        let parent_token =
-            if parent_path.is_empty() {
-                crypto::make_token("oreore-key", ".")
-            } else {
-                crypto::make_token("oreore-key", &parent_path)
-            };
-
         let path_token =
             crypto::make_token(
                 "oreore-key",
                 &path,
             );
 
-        
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            parent_token
-        );
-
-        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
-            Ok(res) => match res.json() {
-                Ok(json) => json,
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            },
-            Err(_) => {
-                reply.error(libc::EIO);
+        let ut = match self.find_ut_for_entry(&parent_path, &name) {
+            Ok(Some(ut)) => ut,
+            Ok(None) => {
+                println!("ut not found for {}", name);
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Err(e) => {
+                reply.error(e);
                 return;
             }
         };
 
-        let mut enc_name = String::new();
-        for enc in result.files {
-            if crypto::decrypt(&enc) == name {
-                enc_name = enc;
-                break;
+        let ciphertext = crypto::encrypt(&name);
+
+        match server_api::remove_index(&ut) {
+            Ok(_) => {
+                println!("remove_index ok for ut={}", ut);
+            }
+            Err(e) => {
+                println!("remove_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
             }
         }
-        println!("enc_name = {}", enc_name);
 
-        match server_api::delete(
-            &parent_token,
-            &enc_name,
-            &path_token,
-        ) {
+        self.dir_map.remove_ut_cache(&parent_path, &ciphertext);
+        if let Err(e) = self.dir_map.save() {
+            println!("dir_map save failed: {}", e);
+        }
+
+        match server_api::delete_storage(&path_token) {
             Ok(_) => {}
             Err(e) => {
-                println!("delete failed: {}", e);
+                println!("delete_storage failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -800,13 +922,6 @@ impl Filesystem for MyFS {
                 format!("{}/{}", parent_path, name)
             };
 
-        let parent_token =
-            if parent_path.is_empty() {
-                crypto::make_token("oreore-key", ".")
-            } else {
-                crypto::make_token("oreore-key", &parent_path)
-            };
-
         let path_token =
             crypto::make_token(
                 "oreore-key",
@@ -814,67 +929,55 @@ impl Filesystem for MyFS {
             );
 
         // ディレクトリ内が空か確認
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            path_token,
-        );
-
-        let result: server_api::SearchResult =
-            match reqwest::blocking::get(&url) {
-                Ok(res) => match res.json() {
-                    Ok(json) => json,
-                    Err(_) => {
-                        reply.error(libc::EIO);
-                        return;
-                    }
-                },
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            };
-
-        if !result.files.is_empty() {
-            reply.error(libc::ENOTEMPTY);
-            return;
-        }
-
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            parent_token
-        );
-
-        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
-            Ok(res) => match res.json() {
-                Ok(json) => json,
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            },
-            Err(_) => {
-                reply.error(libc::EIO);
+        let children = match self.search_directory(&path) {
+            Ok(files) => files,
+            Err(e) => {
+                reply.error(e);
                 return;
             }
         };
 
-        let mut enc_name = String::new();
-        for enc in result.files {
-            if crypto::decrypt(&enc) == name {
-                enc_name = enc;
-                break;
+        if !children.is_empty() {
+            reply.error(libc::ENOTEMPTY);
+            return;
+        }
+
+        let ut = match self.find_ut_for_entry(&parent_path, &name) {
+            Ok(Some(ut)) => ut,
+            Ok(None) => {
+                println!("ut not found for {}", name);
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
+        let ciphertext = crypto::encrypt(&name);
+
+        match server_api::remove_index(&ut) {
+            Ok(_) => {
+                println!("remove_index ok for ut={}", ut);
+            }
+            Err(e) => {
+                println!("remove_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
             }
         }
-        println!("enc_name = {}", enc_name);
 
-        match server_api::delete(
-            &parent_token,
-            &enc_name,
-            &path_token,
-        ) {
+        self.dir_map.remove_ut_cache(&parent_path, &ciphertext);
+        self.dir_map.remove_path(&path);
+        if let Err(e) = self.dir_map.save() {
+            println!("dir_map save failed: {}", e);
+        }
+
+        match server_api::delete_storage(&path_token) {
             Ok(_) => {}
             Err(e) => {
-                println!("delete failed: {}", e);
+                println!("delete_storage failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -1072,84 +1175,7 @@ impl Filesystem for MyFS {
         };
 
         //
-        // 2. 移動元ディレクトリのインデックスを検索し、old_ciphertext を取得
-        //
-        let old_parent_token = if old_parent_path.is_empty() {
-            crypto::make_token("oreore-key", ".")
-        } else {
-            crypto::make_token("oreore-key", &old_parent_path)
-        };
-
-        let url = format!(
-            "http://192.168.11.8:2226/search?token={}",
-            old_parent_token
-        );
-
-        let result: server_api::SearchResult = match reqwest::blocking::get(&url) {
-            Ok(res) => match res.json() {
-                Ok(json) => json,
-                Err(_) => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            },
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
-        };
-
-        let mut old_ciphertext = String::new();
-        for enc in &result.files {
-            if crypto::decrypt(enc) == old_name {
-                old_ciphertext = enc.clone();
-                break;
-            }
-        }
-
-        if old_ciphertext.is_empty() {
-            reply.error(libc::ENOENT);
-            return;
-        }
-
-        //
-        // 3. 移動元ディレクトリから削除
-        //
-        match server_api::remove_index(&old_parent_token, &old_ciphertext) {
-            Ok(_) => {
-                println!("removed from old parent index");
-            }
-            Err(e) => {
-                println!("remove_index failed: {}", e);
-                reply.error(libc::EIO);
-                return;
-            }
-        }
-
-        //
-        // 4. 移動先ディレクトリへ登録
-        //
-        let new_parent_token = if new_parent_path.is_empty() {
-            crypto::make_token("oreore-key", ".")
-        } else {
-            crypto::make_token("oreore-key", &new_parent_path)
-        };
-
-        let new_ciphertext = crypto::encrypt(&new_name);
-
-        match server_api::add_index(&new_parent_token, &new_ciphertext) {
-            Ok(_) => {
-                println!("added to new parent index");
-            }
-            Err(e) => {
-                println!("add_index failed: {}", e);
-                reply.error(libc::EIO);
-                return;
-            }
-        }
-
-        //
-        // 5. 対象がディレクトリかどうか確認
+        // 2. 対象がディレクトリかどうか確認
         //
         let old_path_token = crypto::make_token("oreore-key", &old_path);
 
@@ -1173,6 +1199,82 @@ impl Filesystem for MyFS {
         };
 
         let is_dir = stat_result.is_dir;
+
+        // ディレクトリの cross-directory move は未サポート
+        if is_dir && old_parent_path != new_parent_path {
+            reply.error(libc::EXDEV);
+            return;
+        }
+
+        //
+        // 3. 移動元ディレクトリからインデックス削除
+        //
+        let old_ut = match self.find_ut_for_entry(&old_parent_path, &old_name) {
+            Ok(Some(ut)) => ut,
+            Ok(None) => {
+                println!("ut not found for {}", old_name);
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
+        };
+
+        match server_api::remove_index(&old_ut) {
+            Ok(_) => {
+                println!("removed from old parent index");
+            }
+            Err(e) => {
+                println!("remove_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        let old_ciphertext = crypto::encrypt(&old_name);
+        self.dir_map.remove_ut_cache(&old_parent_path, &old_ciphertext);
+
+        //
+        // 4. 移動先ディレクトリへ登録
+        //
+        let new_ciphertext = crypto::encrypt(&new_name);
+
+        let (_keyword_id, new_ut) = match self.advance_st_and_get_ut(&new_parent_path) {
+            Ok((kw, ut)) => (kw, ut),
+            Err(e) => {
+                println!("advance ST failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        match server_api::add_index(&new_ut, &new_ciphertext) {
+            Ok(_) => {
+                println!("added to new parent index");
+            }
+            Err(e) => {
+                println!("add_index failed: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        self.dir_map.add_ut_cache(&new_parent_path, &new_ciphertext, &new_ut);
+        if let Err(e) = self.dir_map.save() {
+            println!("dir_map save failed: {}", e);
+        }
+
+        //
+        // 5. ディレクトリ自身の rename 時は DirMap も更新
+        //
+        if is_dir {
+            self.dir_map.rename_path(&old_path, &new_path);
+            if let Err(e) = self.dir_map.save() {
+                println!("dir_map save failed: {}", e);
+            }
+        }
 
         //
         // 6. 実データをリネーム

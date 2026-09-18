@@ -1,10 +1,8 @@
-
-use serde::Serialize;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 struct AddRequest {
-    token: String,
+    ut: String,
     ciphertext: String,
 }
 
@@ -47,13 +45,6 @@ pub struct StatResult {
 }
 
 #[derive(Serialize)]
-struct DeleteRequest {
-    parent_token: String,
-    ciphertext: String,
-    path_token: String,
-}
-
-#[derive(Serialize)]
 struct SetattrRequest {
     token: String,
     mode: Option<u32>,
@@ -66,9 +57,20 @@ struct SetattrRequest {
 }
 
 #[derive(Serialize)]
+struct SearchRequest {
+    st: String,
+    dk: String,
+    counter: u64,
+}
+
+#[derive(Serialize)]
 struct RemoveIndexRequest {
-    parent_token: String,
-    ciphertext: String,
+    ut: String,
+}
+
+#[derive(Serialize)]
+struct DeleteStorageRequest {
+    path_token: String,
 }
 
 #[derive(Serialize)]
@@ -81,23 +83,57 @@ struct RenameRequest {
 use crate::crypto;
 
 pub fn add_index(
-    token: &str,
+    ut: &str,
     ciphertext: &str,
 ) -> Result<(), Box<dyn std::error::Error>>
 {
     let req = AddRequest {
-        token: token.to_string(),
+        ut: ut.to_string(),
         ciphertext: ciphertext.to_string(),
     };
 
     let client = reqwest::blocking::Client::new();
 
-    client
+    let response = client
         .post("http://192.168.11.8:2226/add")
         .json(&req)
         .send()?;
 
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "add_index failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
     Ok(())
+}
+
+pub fn search(
+    st: &str,
+    dk: &str,
+    counter: u64,
+) -> Result<SearchResult, Box<dyn std::error::Error>>
+{
+    let req = SearchRequest {
+        st: st.to_string(),
+        dk: dk.to_string(),
+        counter,
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let res = client
+        .post("http://192.168.11.8:2226/search")
+        .json(&req)
+        .send()?;
+
+    let result: SearchResult = res.json()?;
+
+    Ok(result)
 }
 
 pub fn setattr(
@@ -206,7 +242,7 @@ pub fn mkdir(
     if !response.status().is_success() {
         return Err(
             format!(
-                "upload failed: {}",
+                "mkdir failed: {}",
                 response.status()
             )
             .into(),
@@ -247,45 +283,40 @@ pub fn download(
     )
 }
 
-pub fn delete(
-    parent_token: &str,
-    ciphertext: &str,
-    path_token: &str,
-) -> Result<(), Box<dyn std::error::Error>>
-{
-    let req = DeleteRequest {
-        parent_token: parent_token.to_string(),
-        ciphertext: ciphertext.to_string(),
-        path_token: path_token.to_string(),
-    };
+pub fn get_by_ut(
+    ut: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let url = format!(
+        "http://192.168.11.8:2226/get_by_ut?ut={}",
+        ut
+    );
 
-    let client = reqwest::blocking::Client::new();
+    let response = reqwest::blocking::get(&url)?;
 
-    let response = client
-        .post("http://192.168.11.8:2226/delete")
-        .json(&req)
-        .send()?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
 
     if !response.status().is_success() {
         return Err(
             format!(
-                "delete failed: {}",
+                "get_by_ut failed: {}",
                 response.status()
             )
             .into(),
         );
     }
 
-    Ok(())
+    let ciphertext = response.text()?;
+
+    Ok(Some(ciphertext))
 }
 
 pub fn remove_index(
-    parent_token: &str,
-    ciphertext: &str,
+    ut: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let req = RemoveIndexRequest {
-        parent_token: parent_token.to_string(),
-        ciphertext: ciphertext.to_string(),
+        ut: ut.to_string(),
     };
 
     let client = reqwest::blocking::Client::new();
@@ -299,6 +330,33 @@ pub fn remove_index(
         return Err(
             format!(
                 "remove_index failed: {}",
+                response.status()
+            )
+            .into(),
+        );
+    }
+
+    Ok(())
+}
+
+pub fn delete_storage(
+    path_token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = DeleteStorageRequest {
+        path_token: path_token.to_string(),
+    };
+
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("http://192.168.11.8:2226/delete_storage")
+        .json(&req)
+        .send()?;
+
+    if !response.status().is_success() {
+        return Err(
+            format!(
+                "delete_storage failed: {}",
                 response.status()
             )
             .into(),

@@ -116,6 +116,109 @@ fn create_key(path: &Path) -> Result<[u8; KEY_SIZE], Box<dyn std::error::Error>>
     Ok(key)
 }
 
+// --- TDP (Trapdoor Permutation) key management ---
+
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::pkcs1::{EncodeRsaPrivateKey, DecodeRsaPrivateKey, LineEnding as Pkcs1LineEnding};
+use rsa::pkcs8::EncodePublicKey;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use num_bigint_dig::BigUint;
+
+const TDP_PRIVATE_KEY_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.config/ssefs/tdp_private.pem");
+const TDP_PUBLIC_KEY_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.config/ssefs/tdp_public.pem");
+
+static TDP_PRIVATE_KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+
+/// TDP 鍵対を初期化する。
+pub fn tdp_init() -> Result<(), Box<dyn std::error::Error>> {
+    let key = load_or_create_tdp_key()?;
+    TDP_PRIVATE_KEY
+        .set(key)
+        .map_err(|_| "TDP private key already initialized".to_string())?;
+    Ok(())
+}
+
+/// 初期化済みの TDP 秘密鍵を取得する。
+pub fn get_tdp_private_key() -> &'static RsaPrivateKey {
+    TDP_PRIVATE_KEY
+        .get()
+        .expect("TDP private key not initialized. Call tdp_init() first.")
+}
+
+/// TDP 公開鍵を PEM 形式で取得する（サーバ配布用）。
+pub fn get_tdp_public_key_pem() -> Result<String, Box<dyn std::error::Error>> {
+    let priv_key = get_tdp_private_key();
+    let pub_key = RsaPublicKey::from(priv_key);
+    let pem = pub_key.to_public_key_pem(rsa::pkcs8::LineEnding::LF)?;
+    Ok(pem)
+}
+
+/// TDP モジュラス n を取得する。
+pub fn get_tdp_n() -> BigUint {
+    let pub_key = RsaPublicKey::from(get_tdp_private_key());
+    pub_key.n().clone()
+}
+
+/// TDP 秘密指数 d を取得する。
+pub fn get_tdp_d() -> BigUint {
+    get_tdp_private_key().d().clone()
+}
+
+/// TDP 公開指数 e を取得する。
+pub fn get_tdp_e() -> BigUint {
+    let pub_key = RsaPublicKey::from(get_tdp_private_key());
+    pub_key.e().clone()
+}
+
+fn load_or_create_tdp_key() -> Result<RsaPrivateKey, Box<dyn std::error::Error>> {
+    let priv_path = Path::new(TDP_PRIVATE_KEY_FILE);
+    if priv_path.exists() {
+        let pem = fs::read_to_string(priv_path)
+            .map_err(|e| format!("Failed to read TDP private key: {}", e))?;
+        let key = RsaPrivateKey::from_pkcs1_pem(&pem)
+            .map_err(|e| format!("Failed to parse TDP private key: {}", e))?;
+        Ok(key)
+    } else {
+        create_tdp_key(priv_path)
+    }
+}
+
+fn create_tdp_key(priv_path: &Path) -> Result<RsaPrivateKey, Box<dyn std::error::Error>> {
+    let dir = Path::new(KEY_DIR);
+    if !dir.exists() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create directory {}: {}", KEY_DIR, e))?;
+    }
+
+    let mut rng = rand::thread_rng();
+    let private_key = RsaPrivateKey::new(&mut rng, 2048)
+        .map_err(|e| format!("Failed to generate RSA key: {}", e))?;
+
+    let priv_pem = private_key.to_pkcs1_pem(Pkcs1LineEnding::LF)
+        .map_err(|e| format!("Failed to encode TDP private key: {}", e))?;
+    fs::write(priv_path, priv_pem.as_bytes())
+        .map_err(|e| format!("Failed to write TDP private key: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(priv_path)
+            .map_err(|e| format!("Failed to get metadata: {}", e))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(priv_path, permissions)
+            .map_err(|e| format!("Failed to set permissions: {}", e))?;
+    }
+
+    let pub_key = RsaPublicKey::from(&private_key);
+    let pub_pem = pub_key.to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+        .map_err(|e| format!("Failed to encode TDP public key: {}", e))?;
+    fs::write(TDP_PUBLIC_KEY_FILE, pub_pem)
+        .map_err(|e| format!("Failed to write TDP public key: {}", e))?;
+
+    Ok(private_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

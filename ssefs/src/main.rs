@@ -13,6 +13,10 @@ mod crypto;
 mod server_api;
 mod myfs;
 mod key_manager;
+mod keyword_state;
+
+#[cfg(test)]
+mod forward_privacy_test;
 
 // ssefsグループのIDを取得する関数
 fn get_ssefs_group_id() -> u32 {
@@ -95,12 +99,20 @@ fn main() {
         std::process::exit(1);
     }
 
+    // TDP 鍵対を初期化（.config/ssefs/tdp_private.pem / tdp_public.pem）
+    if let Err(e) = key_manager::tdp_init() {
+        eprintln!("Failed to initialize TDP key: {}", e);
+        std::process::exit(1);
+    }
+
     // ssefsグループのIDを取得
     let ssefs_gid = get_ssefs_group_id();
     
     let mountpoint = std::env::args()
         .nth(1)
         .expect("mountpoint");
+
+    let dir_map = keyword_state::DirMap::load_or_create();
 
     fuser::mount2(
         MyFS {
@@ -111,7 +123,8 @@ fn main() {
                 ("".to_string(), ROOT_INO),
             ]),
             next_inode: 2,
-            ssefs_gid: ssefs_gid,  // グループIDをMyFSに渡す
+            ssefs_gid: ssefs_gid,
+            dir_map,
         },
         mountpoint,
         &[MountOption::FSName("ssefs".into())],
