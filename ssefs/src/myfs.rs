@@ -16,7 +16,7 @@ use crate::server_api;
 use crate::keyword_state::{DirMap, KeywordState};
 use crate::key_manager;
 
-const TTL: Duration = Duration::from_secs(0);
+const TTL: Duration = Duration::from_secs(60);
 
 pub struct MyFS {
     pub next_inode: u64,
@@ -72,26 +72,26 @@ impl MyFS {
                 names.push(plain);
             }
         }
-        println!(
+        log::debug!(
             "[search_directory] path={}, keyword_id={}, counter={}",
             path,
             keyword_id,
             state.counter
         );
 
-        println!(
+        log::debug!(
             "[search_directory] latest_st={}",
             state.latest_st
         );
 
-        println!(
+        log::debug!(
             "[search_directory] server returned {} files",
             result.files.len()
         );
 
         for (i, encrypted_name) in result.files.iter().enumerate() {
             let plain = crypto::decrypt(encrypted_name);
-            println!(
+            log::trace!(
                 "[search_directory] result[{}] = {:?}",
                 i,
                 plain
@@ -135,6 +135,8 @@ impl MyFS {
     }
 
     /// 指定ディレクトリ内から target_name に一致するエントリの UT を探索して返す
+    /// Forward Privacy 導入後、ファイル名はランダム nonce で暗号化されるため、
+    /// ciphertext の一致ではなく plaintext（復号後のファイル名）で一致判定する。
     fn find_ut_for_entry(&mut self, parent_path: &str, target_name: &str) -> Result<Option<String>, i32> {
         let keyword_id = match self.dir_map.path_to_keyword.get(parent_path) {
             Some(kw) => kw.clone(),
@@ -151,38 +153,41 @@ impl MyFS {
         let master_key = key_manager::get_key();
         let dk = crypto::derive_dk(master_key, &keyword_id);
 
+        // 1. まずローカルキャッシュを plaintext ベースで検索
+        if let Some(ut) = self.dir_map.get_ut_cache(parent_path, target_name) {
+            log::debug!("find_ut_for_entry: cache hit for {}, ut={}", target_name, ut);
+            return Ok(Some(ut.clone()));
+        }
+
+        // 2. サーバから ciphertext 一覧を取得
         let result = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
             Ok(r) => r,
             Err(_) => return Err(libc::EIO),
         };
 
-        let ciphertext = crypto::encrypt(target_name);
-        for enc in &result.files {
-            if enc == &ciphertext {
-                // server_api::search はファイル名を返すだけなので UT は直接的に返されない。
-                // Phase 3 では O(counter) 探索でクライアント側でも UT を再導出できる。
-                // ここでは ut_cache を信頼し、なければ cache miss として server 側の
-                // get_by_ut を使う方針は採用しない。
-                // 代わりに、client 側で ST chain をたどり UT を再計算して特定する。
-                let n = key_manager::get_tdp_n();
-                let e = key_manager::get_tdp_e();
+        let n = key_manager::get_tdp_n();
+        let e = key_manager::get_tdp_e();
+
+        // result.files は [最新, 1つ前, ..., 最古] の順。
+        // 各 ciphertext を復号して plaintext と比較し、一致したらその世代の UT を導出する。
+        for (idx, enc) in result.files.iter().enumerate() {
+            let plain = crypto::decrypt(enc);
+            if plain == target_name {
                 let mut st = crypto::base64_to_biguint(&state.latest_st)
                     .ok_or(libc::EIO)?;
-                // 最新から逆方向（counter 分）たどる
-                // サーバ側は eval(st^e) で過去へ進む。クライアントも同じ。
-                println!("counter = {}", state.counter);
-                for _ in 0..state.counter {
-                    let ut = crypto::derive_ut(&dk, &st);
-                    // この UT に対応するエントリがサーバにあるか get_by_ut で確認
-                    match server_api::get_by_ut(&ut) {
-                        Ok(Some(val)) if val == *enc => return Ok(Some(ut)),
-                        _ => {}
-                    }
-                    st = st.modpow(&e, &n); // TDP eval: 過去へ
+                // idx 番目 = latest_st から idx 回 backward eval した ST
+                for _ in 0..idx {
+                    st = st.modpow(&e, &n);
                 }
-                return Ok(None);
+                let ut = crypto::derive_ut(&dk, &st);
+                // 見つかった UT はキャッシュに登録しておく
+                self.dir_map.add_ut_cache(parent_path, target_name, &ut);
+                log::debug!("find_ut_for_entry: found {} at idx={}, ut={}", target_name, idx, ut);
+                return Ok(Some(ut));
             }
         }
+
+        log::debug!("find_ut_for_entry: {} not found in {} entries", target_name, result.files.len());
         Ok(None)
     }
 }
@@ -196,7 +201,7 @@ impl Filesystem for MyFS {
         name: &OsStr,
         reply: ReplyEntry,
     ) {
-        println!(
+        log::info!(
             "lookup(parent={}, name={:?})",
             parent,
             name
@@ -229,7 +234,7 @@ impl Filesystem for MyFS {
         }
 
         if !found {
-            println!("not found");
+            log::info!("lookup: {} not found in {}", target_name, parent_path);
             reply.error(libc::ENOENT);
             return;
         }
@@ -312,7 +317,7 @@ impl Filesystem for MyFS {
         ino: u64,
         reply: ReplyAttr,
     ) {
-        println!("getattr({})", ino);
+        log::info!("getattr({})", ino);
 
         let path = match self.inode_to_query.get(&ino) {
             Some(q) => q.clone(),
@@ -356,7 +361,7 @@ impl Filesystem for MyFS {
                 FileType::RegularFile
             };
 
-        println!("size={}", result.size);
+        log::debug!("getattr: size={}", result.size);
         let attr = FileAttr {
             ino,
             size: result.size,
@@ -390,7 +395,7 @@ impl Filesystem for MyFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        println!("readdir({}, offset={})", ino, offset);
+        log::info!("readdir({}, offset={})", ino, offset);
 
         // inode → query
         let path = match self.inode_to_query.get(&ino) {
@@ -418,7 +423,7 @@ impl Filesystem for MyFS {
             None => "",
         };
         let parent_ino = self.get_inode(parent_path);
-        println!("parent_ino = {}", parent_ino);
+        log::debug!("readdir: parent_ino = {}", parent_ino);
         entries.push((parent_ino, FileType::Directory, "..".to_string()));
 
         for filename in names {
@@ -451,13 +456,13 @@ impl Filesystem for MyFS {
         for (i, (entry_ino, entry_type, name)) in entries.iter().enumerate().skip(offset as usize) {
             let next_offset = (i + 1) as i64;
             if reply.add(*entry_ino, next_offset, *entry_type, name) {
-                println!("readdir buffer full at offset {}", next_offset);
+                log::debug!("readdir buffer full at offset {}", next_offset);
                 break;
             }
             added += 1;
         }
 
-        println!(
+        log::info!(
             "readdir entries={}, added={}, started_at_offset={}",
             entries.len(),
             added,
@@ -477,7 +482,7 @@ impl Filesystem for MyFS {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        println!(
+        log::info!(
             "create(parent={}, name={:?}, mode={}, flags={})",
             parent,
             name,
@@ -532,7 +537,7 @@ impl Filesystem for MyFS {
         let (_keyword_id, ut) = match self.advance_st_and_get_ut(&parent_path) {
             Ok((kw, ut)) => (kw, ut),
             Err(e) => {
-                println!("advance ST failed: {}", e);
+                log::error!("advance ST failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -540,18 +545,18 @@ impl Filesystem for MyFS {
 
         match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
-                println!("index updated with ut={}", ut);
+                log::debug!("index updated with ut={}", ut);
             }
             Err(e) => {
-                println!("add_index failed: {}", e);
+                log::error!("add_index failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        self.dir_map.add_ut_cache(&parent_path, &ciphertext, &ut);
+        self.dir_map.add_ut_cache(&parent_path, &name, &ut);
         if let Err(e) = self.dir_map.save() {
-            println!("dir_map save failed: {}", e);
+            log::error!("dir_map save failed: {}", e);
         }
 
         let path_token = crypto::make_token("oreore-key", &path);
@@ -561,10 +566,10 @@ impl Filesystem for MyFS {
             self.ssefs_gid,
         ) {
             Ok(_) => {
-                println!("upload ok");
+                log::info!("upload ok");
             }
             Err(e) => {
-                println!("upload failed: {}", e);
+                log::error!("upload failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -591,7 +596,7 @@ impl Filesystem for MyFS {
         reply: ReplyData,
     ) {
 
-        println!("read({})", ino);
+        log::info!("read({})", ino);
 
         let path =
             match self.inode_to_query.get(&ino) {
@@ -647,7 +652,7 @@ impl Filesystem for MyFS {
         reply: ReplyWrite,
     ) {
 
-        println!("write({})", ino);
+        log::info!("write({})", ino);
 
         let path =
             match self.inode_to_query.get(&ino) {
@@ -709,7 +714,7 @@ impl Filesystem for MyFS {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        println!(
+        log::info!(
             "mkdir(parent={}, name={:?})",
             parent,
             name,
@@ -765,7 +770,7 @@ impl Filesystem for MyFS {
         let (_keyword_id, ut) = match self.advance_st_and_get_ut(&parent_path) {
             Ok((kw, ut)) => (kw, ut),
             Err(e) => {
-                println!("advance ST failed: {}", e);
+                log::error!("advance ST failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -773,18 +778,18 @@ impl Filesystem for MyFS {
 
         match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
-                println!("index updated with ut={}", ut);
+                log::debug!("index updated with ut={}", ut);
             }
             Err(e) => {
-                println!("index update failed: {}", e);
+                log::error!("index update failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        self.dir_map.add_ut_cache(&parent_path, &ciphertext, &ut);
+        self.dir_map.add_ut_cache(&parent_path, &name, &ut);
         if let Err(e) = self.dir_map.save() {
-            println!("dir_map save failed: {}", e);
+            log::error!("dir_map save failed: {}", e);
         }
 
         let path_token = crypto::make_token("oreore-key", &path);
@@ -793,10 +798,10 @@ impl Filesystem for MyFS {
             self.ssefs_gid,
         ) {
             Ok(_) => {
-                println!("upload ok");
+                log::info!("mkdir ok");
             }
             Err(e) => {
-                println!("upload failed: {}", e);
+                log::error!("mkdir failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -816,7 +821,7 @@ impl Filesystem for MyFS {
         name: &OsStr,
         reply: ReplyEmpty,
     ) {
-        println!(
+        log::info!(
             "unlink(parent={}, name={:?})",
             parent,
             name,
@@ -848,7 +853,7 @@ impl Filesystem for MyFS {
         let ut = match self.find_ut_for_entry(&parent_path, &name) {
             Ok(Some(ut)) => ut,
             Ok(None) => {
-                println!("ut not found for {}", name);
+                log::warn!("ut not found for {}", name);
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -858,28 +863,26 @@ impl Filesystem for MyFS {
             }
         };
 
-        let ciphertext = crypto::encrypt(&name);
-
         match server_api::remove_index(&ut) {
             Ok(_) => {
-                println!("remove_index ok for ut={}", ut);
+                log::debug!("remove_index ok for ut={}", ut);
             }
             Err(e) => {
-                println!("remove_index failed: {}", e);
+                log::error!("remove_index failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        self.dir_map.remove_ut_cache(&parent_path, &ciphertext);
+        self.dir_map.remove_ut_cache(&parent_path, &name);
         if let Err(e) = self.dir_map.save() {
-            println!("dir_map save failed: {}", e);
+            log::error!("dir_map save failed: {}", e);
         }
 
         match server_api::delete_storage(&path_token) {
             Ok(_) => {}
             Err(e) => {
-                println!("delete_storage failed: {}", e);
+                log::error!("delete_storage failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -899,7 +902,7 @@ impl Filesystem for MyFS {
         name: &OsStr,
         reply: ReplyEmpty,
     ) {
-        println!(
+        log::info!(
             "rmdir(parent={}, name={:?})",
             parent,
             name,
@@ -945,7 +948,7 @@ impl Filesystem for MyFS {
         let ut = match self.find_ut_for_entry(&parent_path, &name) {
             Ok(Some(ut)) => ut,
             Ok(None) => {
-                println!("ut not found for {}", name);
+                log::warn!("ut not found for {}", name);
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -955,29 +958,27 @@ impl Filesystem for MyFS {
             }
         };
 
-        let ciphertext = crypto::encrypt(&name);
-
         match server_api::remove_index(&ut) {
             Ok(_) => {
-                println!("remove_index ok for ut={}", ut);
+                log::debug!("remove_index ok for ut={}", ut);
             }
             Err(e) => {
-                println!("remove_index failed: {}", e);
+                log::error!("remove_index failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        self.dir_map.remove_ut_cache(&parent_path, &ciphertext);
+        self.dir_map.remove_ut_cache(&parent_path, &name);
         self.dir_map.remove_path(&path);
         if let Err(e) = self.dir_map.save() {
-            println!("dir_map save failed: {}", e);
+            log::error!("dir_map save failed: {}", e);
         }
 
         match server_api::delete_storage(&path_token) {
             Ok(_) => {}
             Err(e) => {
-                println!("delete_storage failed: {}", e);
+                log::error!("delete_storage failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -1008,7 +1009,7 @@ impl Filesystem for MyFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        println!("setattr({})", ino);
+        log::info!("setattr({})", ino);
 
         let path = match self.inode_to_query.get(&ino) {
             Some(q) => q.clone(),
@@ -1044,14 +1045,14 @@ impl Filesystem for MyFS {
             ctime_unix,
             size,
         ) {
-            println!("setattr failed: {}", e);
+            log::error!("setattr failed: {}", e);
             reply.error(libc::EIO);
             return;
         }
 
         // ファイルサイズ変更処理（古い方法での互換性維持）
         if let Some(new_size) = size {
-            println!("truncate -> {}", new_size);
+            log::debug!("truncate -> {}", new_size);
 
             let path_token = crypto::make_token("oreore-key", &path);
 
@@ -1132,7 +1133,7 @@ impl Filesystem for MyFS {
         _flags: u32,
         reply: ReplyEmpty,
     ) {
-        println!(
+        log::info!(
             "rename(parent={}, name={:?}, newparent={}, newname={:?})",
             parent,
             name,
@@ -1212,7 +1213,7 @@ impl Filesystem for MyFS {
         let old_ut = match self.find_ut_for_entry(&old_parent_path, &old_name) {
             Ok(Some(ut)) => ut,
             Ok(None) => {
-                println!("ut not found for {}", old_name);
+                log::warn!("ut not found for {}", old_name);
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -1224,17 +1225,16 @@ impl Filesystem for MyFS {
 
         match server_api::remove_index(&old_ut) {
             Ok(_) => {
-                println!("removed from old parent index");
+                log::debug!("removed from old parent index");
             }
             Err(e) => {
-                println!("remove_index failed: {}", e);
+                log::error!("remove_index failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        let old_ciphertext = crypto::encrypt(&old_name);
-        self.dir_map.remove_ut_cache(&old_parent_path, &old_ciphertext);
+        self.dir_map.remove_ut_cache(&old_parent_path, &old_name);
 
         //
         // 4. 移動先ディレクトリへ登録
@@ -1244,7 +1244,7 @@ impl Filesystem for MyFS {
         let (_keyword_id, new_ut) = match self.advance_st_and_get_ut(&new_parent_path) {
             Ok((kw, ut)) => (kw, ut),
             Err(e) => {
-                println!("advance ST failed: {}", e);
+                log::error!("advance ST failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
@@ -1252,18 +1252,18 @@ impl Filesystem for MyFS {
 
         match server_api::add_index(&new_ut, &new_ciphertext) {
             Ok(_) => {
-                println!("added to new parent index");
+                log::debug!("added to new parent index");
             }
             Err(e) => {
-                println!("add_index failed: {}", e);
+                log::error!("add_index failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }
         }
 
-        self.dir_map.add_ut_cache(&new_parent_path, &new_ciphertext, &new_ut);
+        self.dir_map.add_ut_cache(&new_parent_path, &new_name, &new_ut);
         if let Err(e) = self.dir_map.save() {
-            println!("dir_map save failed: {}", e);
+            log::error!("dir_map save failed: {}", e);
         }
 
         //
@@ -1272,7 +1272,7 @@ impl Filesystem for MyFS {
         if is_dir {
             self.dir_map.rename_path(&old_path, &new_path);
             if let Err(e) = self.dir_map.save() {
-                println!("dir_map save failed: {}", e);
+                log::error!("dir_map save failed: {}", e);
             }
         }
 
@@ -1283,10 +1283,10 @@ impl Filesystem for MyFS {
 
         match server_api::rename(&old_path_token, &new_path_token, is_dir) {
             Ok(_) => {
-                println!("server rename ok");
+                log::info!("server rename ok");
             }
             Err(e) => {
-                println!("server rename failed: {}", e);
+                log::error!("server rename failed: {}", e);
                 reply.error(libc::EIO);
                 return;
             }

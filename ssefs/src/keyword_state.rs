@@ -117,18 +117,18 @@ impl DirMap {
         }
     }
 
-    pub fn add_ut_cache(&mut self, parent_path: &str, ciphertext: &str, ut: &str) {
-        let key = format!("{}/{}", parent_path, ciphertext);
+    pub fn add_ut_cache(&mut self, parent_path: &str, plaintext: &str, ut: &str) {
+        let key = format!("{}/{}", parent_path, plaintext);
         self.ut_cache.insert(key, ut.to_string());
     }
 
-    pub fn get_ut_cache(&self, parent_path: &str, ciphertext: &str) -> Option<&String> {
-        let key = format!("{}/{}", parent_path, ciphertext);
+    pub fn get_ut_cache(&self, parent_path: &str, plaintext: &str) -> Option<&String> {
+        let key = format!("{}/{}", parent_path, plaintext);
         self.ut_cache.get(&key)
     }
 
-    pub fn remove_ut_cache(&mut self, parent_path: &str, ciphertext: &str) {
-        let key = format!("{}/{}", parent_path, ciphertext);
+    pub fn remove_ut_cache(&mut self, parent_path: &str, plaintext: &str) {
+        let key = format!("{}/{}", parent_path, plaintext);
         self.ut_cache.remove(&key);
     }
 }

@@ -191,7 +191,7 @@ pub fn upload(
 
     let client = reqwest::blocking::Client::new();
 
-    println!(
+    log::debug!(
         "upload filename={} content={:?} gid={}",
         filename,
         content,
@@ -228,7 +228,7 @@ pub fn mkdir(
 
     let client = reqwest::blocking::Client::new();
 
-    println!(
+    log::debug!(
         "upload foldername={} gid={}",
         filename,
         gid,

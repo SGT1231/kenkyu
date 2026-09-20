@@ -17,3 +17,5 @@ serde_json = "1"
 hmac = "0.12"
 rsa = { version = "0.9", features = ["pem"] }
 num-bigint-dig = "0.8"
+log = "0.4"
+env_logger = "0.11"

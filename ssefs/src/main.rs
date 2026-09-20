@@ -7,6 +7,8 @@ use std::str::FromStr;
 
 use std::collections::HashMap;
 
+use log::LevelFilter;
+
 const ROOT_INO: u64 = 1;
 
 mod crypto;
@@ -35,19 +37,19 @@ fn get_ssefs_group_id() -> u32 {
                 if parts.len() >= 3 {
                     // グループIDは3番目の要素
                     if let Ok(gid) = u32::from_str(parts[2]) {
-                        println!("Found ssefs group ID: {}", gid);
+                        log::info!("Found ssefs group ID: {}", gid);
                         return gid;
                     }
                 }
             }
         }
         Err(e) => {
-            println!("Failed to execute getent command: {}", e);
+            log::error!("Failed to execute getent command: {}", e);
         }
     }
     
     // グループが見つからない場合、新しく作成する
-    println!("Creating ssefs group...");
+    log::info!("Creating ssefs group...");
     let output = Command::new("sudo")
         .arg("groupadd")
         .arg("ssefs")
@@ -56,7 +58,7 @@ fn get_ssefs_group_id() -> u32 {
     match output {
         Ok(output) => {
             if output.status.success() {
-                println!("Successfully created ssefs group");
+                log::info!("Successfully created ssefs group");
                 // 再度グループIDを取得
                 let output = Command::new("getent")
                     .arg("group")
@@ -69,7 +71,7 @@ fn get_ssefs_group_id() -> u32 {
                         let parts: Vec<&str> = output_str.split(':').collect();
                         if parts.len() >= 3 {
                             if let Ok(gid) = u32::from_str(parts[2]) {
-                                println!("New ssefs group ID: {}", gid);
+                                log::info!("New ssefs group ID: {}", gid);
                                 return gid;
                             }
                         }
@@ -77,22 +79,37 @@ fn get_ssefs_group_id() -> u32 {
                 }
             } else {
                 let error_str = String::from_utf8_lossy(&output.stderr);
-                println!("Failed to create ssefs group: {}", error_str);
+                log::error!("Failed to create ssefs group: {}", error_str);
             }
         }
         Err(e) => {
-            println!("Failed to execute groupadd command: {}", e);
+            log::error!("Failed to execute groupadd command: {}", e);
         }
     }
     
     // どちらも失敗した場合はデフォルト値を使用
-    println!("Using default group ID: 1001");
+    log::warn!("Using default group ID: 1001");
     1001
 }
 
 use myfs::MyFS;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mountpoint = args
+        .get(1)
+        .expect("Usage: ssefs <mountpoint> [off|error|warn|info|debug|trace]")
+        .clone();
+    let log_level = args
+        .get(2)
+        .map(|s| LevelFilter::from_str(s).unwrap_or(LevelFilter::Off))
+        .unwrap_or(LevelFilter::Off);
+
+    env_logger::Builder::new()
+        .filter_level(log_level)
+        .format_timestamp(None)
+        .init();
+
     // マスター鍵を初期化（.config/ssefs/master.key から読み込み or 生成）
     if let Err(e) = key_manager::init() {
         eprintln!("Failed to initialize master key: {}", e);
@@ -107,10 +124,6 @@ fn main() {
 
     // ssefsグループのIDを取得
     let ssefs_gid = get_ssefs_group_id();
-    
-    let mountpoint = std::env::args()
-        .nth(1)
-        .expect("mountpoint");
 
     let dir_map = keyword_state::DirMap::load_or_create();
 
