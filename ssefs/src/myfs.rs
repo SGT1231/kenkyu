@@ -24,6 +24,8 @@ pub struct MyFS {
     pub query_to_inode: HashMap<String, u64>,
     pub ssefs_gid: u32,
     pub dir_map: DirMap,
+    /// (path) -> (counter, decrypted names) 検索結果キャッシュ
+    pub search_cache: HashMap<String, (u32, Vec<String>)>,
 }
 
 impl MyFS {
@@ -43,6 +45,15 @@ impl MyFS {
 
     /// 指定ディレクトリパスに対する暗号化エントリ名を検索・復号して返す
     fn search_directory(&mut self, path: &str) -> Result<Vec<String>, i32> {
+        let total_start = std::time::Instant::now();
+        let mut client_crypto_ms = 0.0f64;
+        let mut keyword_lookup_ms = 0.0f64;
+        let mut key_fetch_ms = 0.0f64;
+        let mut cache_lookup_ms = 0.0f64;
+        let mut loop_overhead_ms = 0.0f64;
+        let mut cache_update_ms = 0.0f64;
+
+        let t = std::time::Instant::now();
         let keyword_id = match self.dir_map.path_to_keyword.get(path) {
             Some(kw) => kw.clone(),
             None => return Ok(Vec::new()), // キーワード未登録 → 空ディレクトリ
@@ -52,31 +63,71 @@ impl MyFS {
             Some(s) => s.clone(),
             None => return Ok(Vec::new()),
         };
+        keyword_lookup_ms = t.elapsed().as_secs_f64() * 1000.0;
 
         if state.counter == 0 {
             return Ok(Vec::new());
         }
 
-        let master_key = key_manager::get_key();
-        let dk = crypto::derive_dk(master_key, &keyword_id);
+        // クライアント側検索結果キャッシュを確認
+        if let Some((cached_counter, cached_names)) = self.search_cache.get(path) {
+            if *cached_counter == state.counter {
+                let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+                log::debug!(
+                    "[search_directory] path={} keyword_id={} counter={} CACHE_HIT total={:.3}ms names={}",
+                    path, keyword_id, state.counter, total_ms, cached_names.len()
+                );
+                return Ok(cached_names.clone());
+            }
+        }
 
-        let result = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
+        let t = std::time::Instant::now();
+        let master_key = key_manager::get_key();
+        key_fetch_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let crypto_start = std::time::Instant::now();
+        let dk = crypto::derive_dk(master_key, &keyword_id);
+        client_crypto_ms += crypto_start.elapsed().as_secs_f64() * 1000.0;
+
+        let (result, http_ms) = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
             Ok(r) => r,
             Err(_) => return Err(libc::EIO),
         };
 
         let mut names = Vec::new();
+        let loop_start = std::time::Instant::now();
         for encrypted_name in &result.files {
+            let crypto_start = std::time::Instant::now();
             let plain = crypto::decrypt(encrypted_name);
+            client_crypto_ms += crypto_start.elapsed().as_secs_f64() * 1000.0;
             if !plain.is_empty() {
                 names.push(plain);
             }
         }
+        loop_overhead_ms = (loop_start.elapsed().as_secs_f64() * 1000.0 - client_crypto_ms).max(0.0);
+        // search_directory では UT キャッシュを使用しないので cache_lookup/cache_update は 0 のまま
+
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        let accounted_ms = http_ms
+            + result.server_chain_ms
+            + result.server_crypto_ms
+            + client_crypto_ms
+            + keyword_lookup_ms
+            + key_fetch_ms
+            + cache_lookup_ms
+            + loop_overhead_ms
+            + cache_update_ms;
+        let other_ms = (total_ms - accounted_ms).max(0.0);
+
         log::debug!(
-            "[search_directory] path={}, keyword_id={}, counter={}",
-            path,
-            keyword_id,
-            state.counter
+            "[search_directory] path={} keyword_id={} counter={} total={:.3}ms http={:.3}ms server_chain={:.3}ms server_crypto={:.3}ms client_crypto={:.3}ms",
+            path, keyword_id, state.counter,
+            total_ms, http_ms, result.server_chain_ms, result.server_crypto_ms,
+            client_crypto_ms
+        );
+        log::debug!(
+            "[search_directory] client_process_detail keyword_lookup={:.3}ms key_fetch={:.3}ms cache_lookup={:.3}ms loop_overhead={:.3}ms cache_update={:.3}ms other={:.3}ms",
+            keyword_lookup_ms, key_fetch_ms, cache_lookup_ms, loop_overhead_ms, cache_update_ms, other_ms
         );
 
         log::debug!(
@@ -97,6 +148,8 @@ impl MyFS {
                 plain
             );
         }
+
+        self.search_cache.insert(path.to_string(), (state.counter, names.clone()));
 
         Ok(names)
     }
@@ -138,6 +191,15 @@ impl MyFS {
     /// Forward Privacy 導入後、ファイル名はランダム nonce で暗号化されるため、
     /// ciphertext の一致ではなく plaintext（復号後のファイル名）で一致判定する。
     fn find_ut_for_entry(&mut self, parent_path: &str, target_name: &str) -> Result<Option<String>, i32> {
+        let total_start = std::time::Instant::now();
+        let mut client_crypto_ms = 0.0f64;
+        let mut keyword_lookup_ms = 0.0f64;
+        let mut key_fetch_ms = 0.0f64;
+        let mut cache_lookup_ms = 0.0f64;
+        let mut loop_overhead_ms = 0.0f64;
+        let mut cache_update_ms = 0.0f64;
+
+        let t = std::time::Instant::now();
         let keyword_id = match self.dir_map.path_to_keyword.get(parent_path) {
             Some(kw) => kw.clone(),
             None => return Ok(None),
@@ -146,21 +208,36 @@ impl MyFS {
             Some(s) => s.clone(),
             None => return Ok(None),
         };
+        keyword_lookup_ms = t.elapsed().as_secs_f64() * 1000.0;
+
         if state.counter == 0 {
             return Ok(None);
         }
 
+        let t = std::time::Instant::now();
         let master_key = key_manager::get_key();
+        key_fetch_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let crypto_start = std::time::Instant::now();
         let dk = crypto::derive_dk(master_key, &keyword_id);
+        client_crypto_ms += crypto_start.elapsed().as_secs_f64() * 1000.0;
 
         // 1. まずローカルキャッシュを plaintext ベースで検索
+        let cache_start = std::time::Instant::now();
         if let Some(ut) = self.dir_map.get_ut_cache(parent_path, target_name) {
+            cache_lookup_ms = cache_start.elapsed().as_secs_f64() * 1000.0;
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
             log::debug!("find_ut_for_entry: cache hit for {}, ut={}", target_name, ut);
+            log::debug!(
+                "[find_ut_for_entry] parent={} target={} cache_hit total={:.3}ms client_crypto={:.3}ms cache_lookup={:.3}ms",
+                parent_path, target_name, total_ms, client_crypto_ms, cache_lookup_ms
+            );
             return Ok(Some(ut.clone()));
         }
+        cache_lookup_ms = cache_start.elapsed().as_secs_f64() * 1000.0;
 
         // 2. サーバから ciphertext 一覧を取得
-        let result = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
+        let (result, http_ms) = match server_api::search(&state.latest_st, &hex::encode(dk), state.counter as u64) {
             Ok(r) => r,
             Err(_) => return Err(libc::EIO),
         };
@@ -170,9 +247,14 @@ impl MyFS {
 
         // result.files は [最新, 1つ前, ..., 最古] の順。
         // 各 ciphertext を復号して plaintext と比較し、一致したらその世代の UT を導出する。
+        let loop_start = std::time::Instant::now();
         for (idx, enc) in result.files.iter().enumerate() {
+            let crypto_start = std::time::Instant::now();
             let plain = crypto::decrypt(enc);
+            client_crypto_ms += crypto_start.elapsed().as_secs_f64() * 1000.0;
+
             if plain == target_name {
+                let crypto_start = std::time::Instant::now();
                 let mut st = crypto::base64_to_biguint(&state.latest_st)
                     .ok_or(libc::EIO)?;
                 // idx 番目 = latest_st から idx 回 backward eval した ST
@@ -180,14 +262,73 @@ impl MyFS {
                     st = st.modpow(&e, &n);
                 }
                 let ut = crypto::derive_ut(&dk, &st);
+                client_crypto_ms += crypto_start.elapsed().as_secs_f64() * 1000.0;
+
                 // 見つかった UT はキャッシュに登録しておく
+                let cache_update_start = std::time::Instant::now();
                 self.dir_map.add_ut_cache(parent_path, target_name, &ut);
-                log::debug!("find_ut_for_entry: found {} at idx={}, ut={}", target_name, idx, ut);
+                cache_update_ms = cache_update_start.elapsed().as_secs_f64() * 1000.0;
+
+                loop_overhead_ms = (loop_start.elapsed().as_secs_f64() * 1000.0
+                    - client_crypto_ms
+                    - cache_update_ms)
+                    .max(0.0);
+
+                let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+                let accounted_ms = http_ms
+                    + result.server_chain_ms
+                    + result.server_crypto_ms
+                    + client_crypto_ms
+                    + keyword_lookup_ms
+                    + key_fetch_ms
+                    + cache_lookup_ms
+                    + loop_overhead_ms
+                    + cache_update_ms;
+                let other_ms = (total_ms - accounted_ms).max(0.0);
+
+                log::debug!(
+                    "find_ut_for_entry: found {} at idx={}, ut={}",
+                    target_name, idx, ut
+                );
+                log::debug!(
+                    "[find_ut_for_entry] parent={} target={} counter={} total={:.3}ms http={:.3}ms server_chain={:.3}ms server_crypto={:.3}ms client_crypto={:.3}ms",
+                    parent_path, target_name, state.counter,
+                    total_ms, http_ms, result.server_chain_ms, result.server_crypto_ms,
+                    client_crypto_ms
+                );
+                log::debug!(
+                    "[find_ut_for_entry] client_process_detail keyword_lookup={:.3}ms key_fetch={:.3}ms cache_lookup={:.3}ms loop_overhead={:.3}ms cache_update={:.3}ms other={:.3}ms",
+                    keyword_lookup_ms, key_fetch_ms, cache_lookup_ms, loop_overhead_ms, cache_update_ms, other_ms
+                );
                 return Ok(Some(ut));
             }
         }
 
+        loop_overhead_ms = (loop_start.elapsed().as_secs_f64() * 1000.0 - client_crypto_ms).max(0.0);
+
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        let accounted_ms = http_ms
+            + result.server_chain_ms
+            + result.server_crypto_ms
+            + client_crypto_ms
+            + keyword_lookup_ms
+            + key_fetch_ms
+            + cache_lookup_ms
+            + loop_overhead_ms
+            + cache_update_ms;
+        let other_ms = (total_ms - accounted_ms).max(0.0);
+
         log::debug!("find_ut_for_entry: {} not found in {} entries", target_name, result.files.len());
+        log::debug!(
+            "[find_ut_for_entry] parent={} target={} counter={} total={:.3}ms http={:.3}ms server_chain={:.3}ms server_crypto={:.3}ms client_crypto={:.3}ms",
+            parent_path, target_name, state.counter,
+            total_ms, http_ms, result.server_chain_ms, result.server_crypto_ms,
+            client_crypto_ms
+        );
+        log::debug!(
+            "[find_ut_for_entry] client_process_detail keyword_lookup={:.3}ms key_fetch={:.3}ms cache_lookup={:.3}ms loop_overhead={:.3}ms cache_update={:.3}ms other={:.3}ms",
+            keyword_lookup_ms, key_fetch_ms, cache_lookup_ms, loop_overhead_ms, cache_update_ms, other_ms
+        );
         Ok(None)
     }
 }
@@ -543,6 +684,9 @@ impl Filesystem for MyFS {
             }
         };
 
+        // 親ディレクトリの検索結果キャッシュを無効化
+        self.search_cache.remove(&parent_path);
+
         match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
                 log::debug!("index updated with ut={}", ut);
@@ -776,6 +920,9 @@ impl Filesystem for MyFS {
             }
         };
 
+        // 親ディレクトリの検索結果キャッシュを無効化
+        self.search_cache.remove(&parent_path);
+
         match server_api::add_index(&ut, &ciphertext) {
             Ok(_) => {
                 log::debug!("index updated with ut={}", ut);
@@ -879,6 +1026,9 @@ impl Filesystem for MyFS {
             log::error!("dir_map save failed: {}", e);
         }
 
+        // 親ディレクトリの検索結果キャッシュを無効化
+        self.search_cache.remove(&parent_path);
+
         match server_api::delete_storage(&path_token) {
             Ok(_) => {}
             Err(e) => {
@@ -930,6 +1080,10 @@ impl Filesystem for MyFS {
                 "oreore-key",
                 &path,
             );
+
+        // 親ディレクトリと対象ディレクトリの検索結果キャッシュを無効化
+        self.search_cache.remove(&parent_path);
+        self.search_cache.remove(&path);
 
         // ディレクトリ内が空か確認
         let children = match self.search_directory(&path) {
@@ -1319,6 +1473,14 @@ impl Filesystem for MyFS {
             self.query_to_inode.insert(new_child_path.clone(), ino);
             self.inode_to_query.insert(ino, new_child_path);
         }
+
+        // 移動に関わるディレクトリの検索結果キャッシュを無効化
+        self.search_cache.remove(&old_parent_path);
+        self.search_cache.remove(&new_parent_path);
+        self.search_cache.remove(&old_path);
+        self.search_cache.remove(&new_path);
+        let old_prefix_with_slash = format!("{}/", old_path);
+        self.search_cache.retain(|path, _| !path.starts_with(&old_prefix_with_slash));
 
         reply.ok();
     }

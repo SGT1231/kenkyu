@@ -138,6 +138,7 @@ fn main() {
             next_inode: 2,
             ssefs_gid: ssefs_gid,
             dir_map,
+            search_cache: HashMap::new(),
         },
         mountpoint,
         &[MountOption::FSName("ssefs".into())],

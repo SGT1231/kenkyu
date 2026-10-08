@@ -19,9 +19,13 @@ struct MkdirRequest {
     gid: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct SearchResult {
     pub files: Vec<String>,
+    #[serde(default)]
+    pub server_chain_ms: f64,
+    #[serde(default)]
+    pub server_crypto_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -116,7 +120,7 @@ pub fn search(
     st: &str,
     dk: &str,
     counter: u64,
-) -> Result<SearchResult, Box<dyn std::error::Error>>
+) -> Result<(SearchResult, f64), Box<dyn std::error::Error>>
 {
     let req = SearchRequest {
         st: st.to_string(),
@@ -126,14 +130,21 @@ pub fn search(
 
     let client = reqwest::blocking::Client::new();
 
+    let http_start = std::time::Instant::now();
     let res = client
         .post("http://192.168.11.8:2226/search")
         .json(&req)
         .send()?;
 
     let result: SearchResult = res.json()?;
+    let http_ms = http_start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok(result)
+    log::debug!(
+        "[search API] counter={} http_total={:.3}ms server_chain={:.3}ms server_crypto={:.3}ms",
+        counter, http_ms, result.server_chain_ms, result.server_crypto_ms
+    );
+
+    Ok((result, http_ms))
 }
 
 pub fn setattr(
